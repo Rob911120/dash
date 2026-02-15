@@ -1,0 +1,29 @@
+# System / shell
+.ash_history
+.bashrc
+.cache/
+.config/
+.npm/
+.ssh/
+
+# Python
+__pycache__/
+*.pyc
+
+# Claude (all)
+.claude/
+.claude.json
+.claude.json.backup.*
+
+# Secrets / MCP config
+.mcp.json
+
+# Compiled binaries
+bin/
+*.exe
+cmd/cockpit/cockpit
+cmd/cockpit/cockpit_test
+cmd/dashhook/dashhook
+cmd/dashmcp/dashmcp
+cmd/dashquery/dashquery
+cmd/dashwatch/dashwatch
