@@ -10,6 +10,38 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// fileToolNames lists tools that operate on files.
+var fileToolNames = map[string]string{
+	"read": "file_path", "write": "file_path", "edit": "file_path",
+	"grep": "path", "glob": "path", "file": "file_path",
+}
+
+// trackFileFromTool extracts and tracks file paths from tool calls.
+func (m *chatModel) trackFileFromTool(toolName string, args map[string]any) {
+	argName, ok := fileToolNames[toolName]
+	if !ok {
+		return
+	}
+	filePath, _ := args[argName].(string)
+	if filePath == "" {
+		return
+	}
+	m.lastFile = filePath
+	if m.fileCounts == nil {
+		m.fileCounts = make(map[string]int)
+	}
+	m.fileCounts[filePath]++
+	// Update topFile
+	maxCount := 0
+	for f, c := range m.fileCounts {
+		if c > maxCount {
+			maxCount = c
+			m.topFile = f
+		}
+		_ = f
+	}
+}
+
 func (m *chatModel) executeTools(calls []streamToolCall) tea.Cmd {
 	d := m.d
 	sessionID := m.sessionID

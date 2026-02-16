@@ -67,6 +67,10 @@ var sourceRegistry = map[string]SourceFunc{
 	"recent_decisions":   srcRecentDecisions,
 	"pending_decisions":  srcPendingDecisions,
 	"active_agents":      srcActiveAgents,
+	// Orchestrator sources
+	"work_orders":        srcWorkOrders,
+	"pipeline_status":    srcPipelineStatus,
+	"active_work_order":  srcActiveWorkOrder,
 }
 
 // RunPipeline executes a pipeline and returns the concatenated text.
@@ -676,6 +680,85 @@ func srcPlanExecution(p SourceParams) string {
 		}
 	}
 
+	return b.String()
+}
+
+// srcWorkOrders lists active work orders for the orchestrator.
+func srcWorkOrders(p SourceParams) string {
+	orders, err := p.D.ListActiveWorkOrders(p.Ctx)
+	if err != nil || len(orders) == 0 {
+		return "\nWORK ORDERS: inga aktiva\n"
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("\nWORK ORDERS (%d):\n", len(orders)))
+	for _, wo := range orders {
+		agent := wo.AgentKey
+		if agent == "" {
+			agent = "unassigned"
+		}
+		line := fmt.Sprintf("- %s [%s] agent:%s", wo.Node.Name, wo.Status, agent)
+		if wo.BranchName != "" {
+			line += fmt.Sprintf(" branch:%s", wo.BranchName)
+		}
+		if wo.Attempt > 0 {
+			line += fmt.Sprintf(" attempt:%d", wo.Attempt)
+		}
+		b.WriteString(line + "\n")
+	}
+	return b.String()
+}
+
+// srcPipelineStatus aggregates active work orders per status as a health indicator.
+func srcPipelineStatus(p SourceParams) string {
+	orders, err := p.D.ListActiveWorkOrders(p.Ctx)
+	if err != nil || len(orders) == 0 {
+		return "\nPIPELINE: idle\n"
+	}
+
+	counts := make(map[WorkOrderStatus]int)
+	for _, wo := range orders {
+		counts[wo.Status]++
+	}
+
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("\nPIPELINE STATUS (%d active):\n", len(orders)))
+	for _, status := range []WorkOrderStatus{
+		WOStatusCreated, WOStatusAssigned, WOStatusMutating,
+		WOStatusBuildPassed, WOStatusBuildFailed,
+		WOStatusSynthesisPending, WOStatusMergePending,
+	} {
+		if c, ok := counts[status]; ok {
+			b.WriteString(fmt.Sprintf("  %s: %d\n", status, c))
+		}
+	}
+	return b.String()
+}
+
+// srcActiveWorkOrder shows the active work order assigned to this agent.
+func srcActiveWorkOrder(p SourceParams) string {
+	if p.AgentKey == "" {
+		return ""
+	}
+	wo, err := p.D.GetActiveWorkOrderForAgent(p.Ctx, p.AgentKey)
+	if err != nil || wo == nil {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n== ACTIVE WORK ORDER ==\n")
+	b.WriteString(fmt.Sprintf("Name: %s\n", wo.Node.Name))
+	b.WriteString(fmt.Sprintf("Status: %s\n", wo.Status))
+	if wo.BranchName != "" {
+		b.WriteString(fmt.Sprintf("Branch: %s\n", wo.BranchName))
+	}
+	if len(wo.ScopePaths) > 0 {
+		b.WriteString(fmt.Sprintf("Scope: %s\n", strings.Join(wo.ScopePaths, ", ")))
+	}
+	if wo.Description != "" {
+		b.WriteString(fmt.Sprintf("Task: %s\n", wo.Description))
+	}
+	b.WriteString("Arbeta inom scope. När du är klar, rapportera till orkestratorn.\n")
 	return b.String()
 }
 

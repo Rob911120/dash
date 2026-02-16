@@ -43,13 +43,14 @@ type model struct {
 	notifications []observationNotification
 
 	// Shared data (fetched async)
-	ws        *dash.WorkingSet
-	tasks     []dash.TaskWithDeps
-	proposals []dash.Proposal
-	sessions  []dash.ActivitySummary
-	plans     []*dash.PlanState
-	services  []serviceStatus
-	tree      *dash.HierarchyTree
+	ws         *dash.WorkingSet
+	tasks      []dash.TaskWithDeps
+	proposals  []dash.Proposal
+	sessions   []dash.ActivitySummary
+	plans      []*dash.PlanState
+	services   []serviceStatus
+	tree       *dash.HierarchyTree
+	workOrders []*dash.WorkOrder
 
 	// Agent dashboard
 	preDashState      viewState
@@ -206,7 +207,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sessions = msg.sessions
 			m.plans = msg.plans
 			m.services = msg.services
+			m.workOrders = msg.workOrders
 			m.overlay.rebuildItems(m.plans, m.tasks)
+			// Sync work orders to agent tabs
+			m.agents.updateWorkOrders(msg.workOrders)
 		}
 		return m, nil
 
@@ -329,6 +333,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					Streaming: tab.chat.streaming,
 					ToolName:  tab.chat.toolStatus,
 					Exchanges: tab.chat.meter.exchanges,
+				}
+				// Inject file tracking from TUI agent chat
+				if tab.chat.lastFile != "" {
+					m.agentSnapshot.RecentFiles = []string{tab.chat.lastFile}
+				}
+				if tab.chat.fileCounts != nil {
+					m.agentSnapshot.TopFiles = topNFiles(tab.chat.fileCounts, 3)
 				}
 			}
 		}
@@ -460,7 +471,7 @@ func (m model) View() string {
 	case viewChat:
 		b.WriteString(m.chat.View(m.width, ch))
 	case viewDashboard:
-		b.WriteString(m.overlay.View(m.width, ch, m.tasks, m.proposals, m.plans, m.sessions, m.services, m.ws, m.tree, m.chatCl, m.agents, m.spawnInput, m.spawnBuf, m.activeChat().maxToolIter, m.agentSnapshot))
+		b.WriteString(m.overlay.View(m.width, ch, m.tasks, m.proposals, m.plans, m.sessions, m.services, m.ws, m.tree, m.chatCl, m.agents, m.spawnInput, m.spawnBuf, m.activeChat().maxToolIter, m.agentSnapshot, m.workOrders))
 	case viewAgent:
 		if tab := m.agents.active(); tab != nil {
 			b.WriteString(tab.chat.View(m.width, ch))
@@ -493,7 +504,7 @@ func (m model) footer() string {
 			return tabHint + "  " + agentHelp + tab.chat.FooterHelp()
 		}
 	case viewAgentPicker:
-		return "[1-6] spawn  [esc/Shift+Tab] close"
+		return "[1-7] spawn  [esc/Shift+Tab] close"
 	}
 	return ""
 }
@@ -721,6 +732,36 @@ func (m *model) handleSpawnInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	return m, nil
+}
+
+// topNFiles returns the top N files by frequency from a count map.
+func topNFiles(counts map[string]int, n int) []string {
+	if len(counts) == 0 {
+		return nil
+	}
+	type fc struct {
+		file  string
+		count int
+	}
+	var all []fc
+	for f, c := range counts {
+		all = append(all, fc{f, c})
+	}
+	// Simple selection sort for small N
+	for i := 0; i < len(all) && i < n; i++ {
+		maxIdx := i
+		for j := i + 1; j < len(all); j++ {
+			if all[j].count > all[maxIdx].count {
+				maxIdx = j
+			}
+		}
+		all[i], all[maxIdx] = all[maxIdx], all[i]
+	}
+	result := make([]string, 0, n)
+	for i := 0; i < len(all) && i < n; i++ {
+		result = append(result, all[i].file)
+	}
+	return result
 }
 
 // spawnAgentResultMsg is sent when an agent spawn completes.

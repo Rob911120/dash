@@ -5,15 +5,18 @@ import (
 	"strings"
 	"time"
 
+	"dash"
+
 	"github.com/charmbracelet/lipgloss"
 )
 
-// AvailableAgents - agents that can be spawned via 1-6 keys
+// AvailableAgents - agents that can be spawned via 1-7 keys
 var AvailableAgents = []struct {
 	Key         string
 	DisplayName string
 	Description string
 }{
+	{Key: "orchestrator", DisplayName: "🎯 Orchestrator", Description: "Pipeline manager"},
 	{Key: "cockpit-backend", DisplayName: "🖥️ Backend", Description: "Go/PostgreSQL"},
 	{Key: "cockpit-frontend", DisplayName: "🎨 Frontend", Description: "TypeScript/React"},
 	{Key: "systemprompt-agent", DisplayName: "📝 Prompts", Description: "Prompt engineering"},
@@ -70,17 +73,25 @@ func (s agentStatus) Icon() string {
 }
 
 type agentTab struct {
-	id             string
-	displayName    string
-	agentKey       string
-	status         agentStatus
-	chat           *chatModel
-	mission        string
-	sessionID      string
-	spawnedAt      time.Time
-	spawnedBy      string
-	meter          tokenMeter
-	pendingMessage string // saved input while waiting for lazy spawn
+	id              string
+	displayName     string
+	agentKey        string
+	status          agentStatus
+	chat            *chatModel
+	mission         string
+	sessionID       string
+	spawnedAt       time.Time
+	spawnedBy       string
+	meter           tokenMeter
+	pendingMessage  string // saved input while waiting for lazy spawn
+	activeWorkOrder *activeWO // current work order assigned to this agent
+}
+
+// activeWO holds the essential fields of an active work order for display.
+type activeWO struct {
+	ID     string
+	Name   string
+	Status string
 }
 
 type agentManager struct {
@@ -194,12 +205,23 @@ func (am *agentManager) tabBar(width int) string {
 			shortName = shortName[:5]
 		}
 
+		// WO suffix: show active work order name in tab
+		woSuffix := ""
+		if t.activeWorkOrder != nil {
+			woIcon := woStatusIconStr(t.activeWorkOrder.Status)
+			woName := t.activeWorkOrder.Name
+			if len(woName) > 12 {
+				woName = woName[:12]
+			}
+			woSuffix = fmt.Sprintf(" %s%s", woIcon, woName)
+		}
+
 		if i == am.activeIdx {
-			label := fmt.Sprintf(" %d%s %s ", i+1, icon, t.displayName)
+			label := fmt.Sprintf(" %d%s %s%s ", i+1, icon, t.displayName, woSuffix)
 			parts = append(parts, tabAgentActive.Render(label))
-		} else if t.status != agentIdle {
-			// Spawned agents keep full name
-			label := fmt.Sprintf(" %d%s %s ", i+1, icon, t.displayName)
+		} else if t.status != agentIdle || t.activeWorkOrder != nil {
+			// Spawned agents or agents with WO keep full name
+			label := fmt.Sprintf(" %d%s %s%s ", i+1, icon, t.displayName, woSuffix)
 			parts = append(parts, tabAgentInactive.Render(label))
 		} else {
 			label := fmt.Sprintf(" %d%s %s ", i+1, icon, shortName)
@@ -208,6 +230,55 @@ func (am *agentManager) tabBar(width int) string {
 	}
 
 	return strings.Join(parts, "")
+}
+
+// woStatusIconStr returns a status icon string for a work order status.
+func woStatusIconStr(status string) string {
+	switch status {
+	case "created":
+		return "\u25cb" // ○
+	case "assigned", "mutating":
+		return "\u25b6" // ▶
+	case "build_passed":
+		return "\u2713" // ✓
+	case "build_failed":
+		return "\u2717" // ✗
+	case "synthesis_pending":
+		return "?"
+	case "merge_pending":
+		return "!"
+	case "merged":
+		return "\u25cf" // ●
+	default:
+		return "\u25cb" // ○
+	}
+}
+
+// updateWorkOrders matches active work orders to agent tabs.
+func (am *agentManager) updateWorkOrders(workOrders []*dash.WorkOrder) {
+	// Clear all active WOs first
+	for _, t := range am.tabs {
+		t.activeWorkOrder = nil
+	}
+	if len(workOrders) == 0 {
+		return
+	}
+	// Match work orders to tabs by agent_key
+	for _, wo := range workOrders {
+		if wo.AgentKey == "" {
+			continue
+		}
+		for _, t := range am.tabs {
+			if t.agentKey == wo.AgentKey {
+				t.activeWorkOrder = &activeWO{
+					ID:     wo.Node.ID.String(),
+					Name:   wo.Node.Name,
+					Status: string(wo.Status),
+				}
+				break
+			}
+		}
+	}
 }
 
 // AgentPicker returns a styled overlay showing available agents.
@@ -245,7 +316,7 @@ func AgentPicker(width int) string {
 	helpStyle := lipgloss.NewStyle().
 		Foreground(cGray).
 		Italic(true)
-	lines = append(lines, helpStyle.Render("  Press 1-6 to spawn · esc to close"))
+	lines = append(lines, helpStyle.Render("  Press 1-7 to spawn · esc to close"))
 	
 	// Join with newlines and wrap in a bordered box
 	content := strings.Join(lines, "\n")

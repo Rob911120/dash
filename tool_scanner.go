@@ -56,6 +56,10 @@ func AllToolDefs() map[string]func() *ToolDef {
 		"defSpawnAgent":       defSpawnAgent,
 		"defAgentStatus":      defAgentStatus,
 		"defUpdateAgentStatus": defUpdateAgentStatus,
+		// Pipeline tools
+		"defWorkOrder":     defWorkOrder,
+		"defBuildGateTool": defBuildGateTool,
+		"defPipeline":      defPipeline,
 		// Filesystem tools
 		"defRead":  defRead,
 		"defWrite": defWrite,

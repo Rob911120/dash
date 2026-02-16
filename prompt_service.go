@@ -23,7 +23,7 @@ type PromptOptions struct {
 // cacheTTL returns the cache TTL for a profile.
 func cacheTTL(profileName string) time.Duration {
 	switch profileName {
-	case "task", "suggestion", "execution", "agent-continuous":
+	case "task", "suggestion", "execution", "agent-continuous", "orchestrator":
 		return 1 * time.Minute
 	default:
 		return 5 * time.Minute
@@ -49,6 +49,8 @@ func promptCacheKey(profileName string, opts PromptOptions) string {
 		if opts.AgentKey != "" {
 			return "agent:" + opts.AgentKey
 		}
+	case "orchestrator":
+		return "orchestrator"
 	}
 	return profileName
 }
@@ -72,6 +74,8 @@ func promptHeader(profileName string, opts PromptOptions) string {
 		if opts.AgentKey != "" {
 			return fmt.Sprintf("== AGENT: %s ==\n\n", opts.AgentKey)
 		}
+	case "orchestrator":
+		return "== ORCHESTRATOR ==\n\n"
 	}
 	return "== DASH CONTEXT ==\n\n"
 }

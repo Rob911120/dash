@@ -8,8 +8,19 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 )
+
+// isTransientEOF returns true if the error is an unexpected EOF (transient network issue).
+func isTransientEOF(err error) bool {
+	if err == nil {
+		return false
+	}
+	s := err.Error()
+	return strings.Contains(s, "unexpected EOF") || strings.Contains(s, "EOF") || strings.Contains(s, "connection reset")
+}
 
 // newProviderRequest creates an HTTP request with the correct auth headers for a provider.
 func newProviderRequest(ctx context.Context, prov ProviderConfig, method, path string, body io.Reader) (*http.Request, error) {
@@ -239,16 +250,28 @@ func streamOpenAI(ctx context.Context, client *http.Client, prov ProviderConfig,
 		return
 	}
 
-	req, err := newProviderRequest(ctx, prov, "POST", "/chat/completions", bytes.NewReader(bodyBytes))
-	if err != nil {
-		ch <- StreamEvent{Type: EventError, Error: err}
-		return
+	if os.Getenv("DASH_LLM_DEBUG") != "" {
+		llmDebugLogPayloadSize("openai", model, bodyBytes, len(tools))
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		ch <- StreamEvent{Type: EventError, Error: fmt.Errorf("http: %w", err)}
-		return
+	var resp *http.Response
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := newProviderRequest(ctx, prov, "POST", "/chat/completions", bytes.NewReader(bodyBytes))
+		if err != nil {
+			ch <- StreamEvent{Type: EventError, Error: err}
+			return
+		}
+
+		resp, err = client.Do(req)
+		if err != nil {
+			if attempt == 0 && isTransientEOF(err) {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			ch <- StreamEvent{Type: EventError, Error: fmt.Errorf("http: %w", err)}
+			return
+		}
+		break
 	}
 	defer resp.Body.Close()
 

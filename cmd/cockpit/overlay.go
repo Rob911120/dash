@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -132,7 +133,7 @@ func (o *overlayModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 }
 
 // View renders the 3-column dashboard overlay with a status bar.
-func (o *overlayModel) View(width, height int, tasks []dash.TaskWithDeps, proposals []dash.Proposal, plans []*dash.PlanState, sessions []dash.ActivitySummary, services []serviceStatus, ws *dash.WorkingSet, tree *dash.HierarchyTree, client *chatClient, agents *agentManager, spawnInput bool, spawnBuf []rune, maxToolIter int, snapshot *dash.AgentContextSnapshot) string {
+func (o *overlayModel) View(width, height int, tasks []dash.TaskWithDeps, proposals []dash.Proposal, plans []*dash.PlanState, sessions []dash.ActivitySummary, services []serviceStatus, ws *dash.WorkingSet, tree *dash.HierarchyTree, client *chatClient, agents *agentManager, spawnInput bool, spawnBuf []rune, maxToolIter int, snapshot *dash.AgentContextSnapshot, workOrders []*dash.WorkOrder) string {
 	if width < 40 {
 		width = 80
 	}
@@ -159,7 +160,7 @@ func (o *overlayModel) View(width, height int, tasks []dash.TaskWithDeps, propos
 		col2 = o.renderAgentIntelColumn(width/cols-4, colHeight, snapshot)
 		col3 = o.renderAgentSystemColumn(width/cols-4, colHeight, snapshot)
 	} else {
-		col1 = o.renderWorkColumn(width/cols-4, colHeight, plans, tasks)
+		col1 = o.renderWorkColumn(width/cols-4, colHeight, plans, tasks, workOrders)
 		col2 = o.renderIntelColumn(width/cols-4, colHeight, proposals, ws)
 		col3 = o.renderSystemColumn(width/cols-4, colHeight, services, sessions, ws)
 	}
@@ -204,7 +205,7 @@ func (o *overlayModel) View(width, height int, tasks []dash.TaskWithDeps, propos
 
 // --- Column renderers ---
 
-func (o *overlayModel) renderWorkColumn(w, h int, plans []*dash.PlanState, tasks []dash.TaskWithDeps) string {
+func (o *overlayModel) renderWorkColumn(w, h int, plans []*dash.PlanState, tasks []dash.TaskWithDeps, workOrders []*dash.WorkOrder) string {
 	var b strings.Builder
 	b.WriteString(sectionHeader.Render("WORK"))
 	b.WriteString("\n")
@@ -242,6 +243,22 @@ func (o *overlayModel) renderWorkColumn(w, h int, plans []*dash.PlanState, tasks
 				b.WriteString("  " + line)
 			}
 			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	// Pipeline (Work Orders)
+	if len(workOrders) > 0 {
+		b.WriteString(textPrimary.Render(fmt.Sprintf("PIPELINE (%d)", len(workOrders))))
+		b.WriteString("\n")
+		for _, wo := range workOrders {
+			icon := woStatusIcon(wo.Status)
+			agent := wo.AgentKey
+			if agent == "" {
+				agent = "unassigned"
+			}
+			line := fmt.Sprintf("  %s %s [%s] \u2192 %s", icon, truncate(wo.Node.Name, w-25), wo.Status, agent)
+			b.WriteString(line + "\n")
 		}
 		b.WriteString("\n")
 	}
@@ -506,92 +523,34 @@ func (o *overlayModel) renderStatusBar(w int, client *chatClient, agents *agentM
 
 func (o *overlayModel) renderAgentWorkColumn(w, h int, s *dash.AgentContextSnapshot) string {
 	var b strings.Builder
-	b.WriteString(sectionHeader.Render("AGENT"))
+	b.WriteString(sectionHeader.Render(fmt.Sprintf("SYSTEM PROMPT [%s]", s.AgentKey)))
 	b.WriteString("\n")
 	b.WriteString(sectionDivider.Render(strings.Repeat("\u2500", min(w, 30))))
 	b.WriteString("\n")
 
-	// Mission
-	b.WriteString(textPrimary.Render("MISSION"))
-	b.WriteString("\n")
-	if s.Mission != "" {
-		b.WriteString("  " + truncate(s.Mission, w-4) + "\n")
-	} else {
-		b.WriteString("  " + textDim.Render("(none)") + "\n")
-	}
-	b.WriteString("\n")
-
-	// Role
-	b.WriteString(textPrimary.Render("YOUR ROLE"))
-	b.WriteString("\n")
-	if s.Role != "" {
-		b.WriteString("  " + textCyan.Render(truncate(s.Role, w-4)) + "\n")
-	} else {
-		b.WriteString("  " + textDim.Render(s.AgentKey) + "\n")
-	}
-	b.WriteString("\n")
-
-	// Situation
-	b.WriteString(textPrimary.Render("SITUATION"))
-	b.WriteString("\n")
-	if s.Situation != "" {
-		b.WriteString("  " + truncate(s.Situation, w-4) + "\n")
-	} else {
-		b.WriteString("  " + textDim.Render("(no context frame)") + "\n")
-	}
-	b.WriteString("\n")
-
-	// Next action
-	if s.NextAction != "" {
-		b.WriteString(statusActive.Render("NEXT ACTION"))
-		b.WriteString("\n")
-		b.WriteString("  " + truncate(s.NextAction, w-4) + "\n")
-		b.WriteString("\n")
+	if s.SystemPrompt == "" {
+		b.WriteString(textDim.Render("  (no system prompt loaded)") + "\n")
+		return b.String()
 	}
 
-	// Tasks categorized
-	var active, pending, blocked []dash.TaskSummary
-	for _, t := range s.Tasks {
-		if len(t.BlockedBy) > 0 {
-			blocked = append(blocked, t)
-		} else if t.Status == "in_progress" || t.Status == "active" {
-			active = append(active, t)
+	// The system prompt IS the dashboard — render it line by line
+	lines := strings.Split(s.SystemPrompt, "\n")
+	maxLines := h - 4
+	if maxLines < 10 {
+		maxLines = 10
+	}
+	for i, line := range lines {
+		if i >= maxLines {
+			b.WriteString(textDim.Render(fmt.Sprintf("  ... +%d rader", len(lines)-maxLines)))
+			b.WriteString("\n")
+			break
+		}
+		// Highlight section headers (lines that look like "MISSION:", "TASKS:", etc.)
+		trimmed := strings.TrimSpace(line)
+		if len(trimmed) > 0 && trimmed == strings.ToUpper(trimmed) && !strings.HasPrefix(trimmed, "-") && !strings.HasPrefix(trimmed, "+") {
+			b.WriteString(textPrimary.Render(truncate(line, w-2)) + "\n")
 		} else {
-			pending = append(pending, t)
-		}
-	}
-
-	if len(active) > 0 {
-		b.WriteString(statusActive.Render(fmt.Sprintf("ACTIVE (%d)", len(active))))
-		b.WriteString("\n")
-		for _, t := range active {
-			intent := ""
-			if t.Intent != "" {
-				intent = textDim.Render(" \u2192 " + t.Intent)
-			}
-			b.WriteString("  " + statusActive.Render(truncate(t.Name, w-10)) + intent + "\n")
-		}
-		b.WriteString("\n")
-	}
-
-	if len(pending) > 0 {
-		b.WriteString(statusPending.Render(fmt.Sprintf("QUEUED (%d)", len(pending))))
-		b.WriteString("\n")
-		for _, t := range pending {
-			b.WriteString("  " + truncate(t.Name, w-10) + "\n")
-		}
-		b.WriteString("\n")
-	}
-
-	if len(blocked) > 0 {
-		b.WriteString(statusBlocked.Render(fmt.Sprintf("BLOCKED (%d)", len(blocked))))
-		b.WriteString("\n")
-		for _, t := range blocked {
-			blockedBy := ""
-			if len(t.BlockedBy) > 0 {
-				blockedBy = textDim.Render(" \u2190 " + strings.Join(t.BlockedBy, ", "))
-			}
-			b.WriteString("  " + statusBlocked.Render(truncate(t.Name, w-10)) + blockedBy + "\n")
+			b.WriteString(textDim.Render(truncate(line, w-2)) + "\n")
 		}
 	}
 
@@ -692,6 +651,28 @@ func (o *overlayModel) renderAgentSystemColumn(w, h int, s *dash.AgentContextSna
 		b.WriteString("\n")
 	}
 
+	// Recent files
+	if len(s.RecentFiles) > 0 {
+		b.WriteString(textPrimary.Render("RECENT FILES"))
+		b.WriteString("\n")
+		maxF := min(5, len(s.RecentFiles))
+		for _, f := range s.RecentFiles[:maxF] {
+			b.WriteString("  " + textCyan.Render(filepath.Base(f)) + "\n")
+		}
+		b.WriteString("\n")
+	}
+
+	// Top files
+	if len(s.TopFiles) > 0 {
+		b.WriteString(textPrimary.Render("TOP FILES"))
+		b.WriteString("\n")
+		maxF := min(3, len(s.TopFiles))
+		for _, f := range s.TopFiles[:maxF] {
+			b.WriteString("  " + textCyan.Render(filepath.Base(f)) + "\n")
+		}
+		b.WriteString("\n")
+	}
+
 	// Revision info
 	b.WriteString(textDim.Render(fmt.Sprintf("rev:%d  %s", s.Revision, s.FetchedAt.Format("15:04:05"))))
 
@@ -699,6 +680,28 @@ func (o *overlayModel) renderAgentSystemColumn(w, h int, s *dash.AgentContextSna
 }
 
 // --- Helpers ---
+
+// woStatusIcon returns a status icon for a work order.
+func woStatusIcon(status dash.WorkOrderStatus) string {
+	switch status {
+	case dash.WOStatusCreated:
+		return "\u25cb" // ○
+	case dash.WOStatusAssigned, dash.WOStatusMutating:
+		return "\u25b6" // ▶
+	case dash.WOStatusBuildPassed:
+		return "\u2713" // ✓
+	case dash.WOStatusBuildFailed:
+		return "\u2717" // ✗
+	case dash.WOStatusSynthesisPending:
+		return "?"
+	case dash.WOStatusMergePending:
+		return "!"
+	case dash.WOStatusMerged:
+		return "\u25cf" // ●
+	default:
+		return "\u25cb" // ○
+	}
+}
 
 func (o *overlayModel) findTaskIndex(name string) int {
 	for i, item := range o.items[0] {

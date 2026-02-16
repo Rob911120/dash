@@ -66,7 +66,8 @@ type WorkOrder struct {
 	LastEvent  *WorkOrderEvent `json:"last_event,omitempty"`
 	EventCount int             `json:"event_count"`
 
-	AllowPublicAPIChange bool `json:"allow_public_api_change,omitempty"`
+	AllowPublicAPIChange bool   `json:"allow_public_api_change,omitempty"`
+	Description          string `json:"description,omitempty"`
 }
 
 // validTransitions defines allowed status transitions.
@@ -142,6 +143,7 @@ func (d *Dash) CreateWorkOrder(ctx context.Context, name string, taskID *uuid.UU
 		RepoRoot:             opts.RepoRoot,
 		ScopePaths:           scopePaths,
 		AllowPublicAPIChange: opts.AllowPublicAPIChange,
+		Description:          opts.Description,
 	}
 
 	dataJSON, err := json.Marshal(wo)
@@ -180,6 +182,7 @@ func (d *Dash) CreateWorkOrder(ctx context.Context, name string, taskID *uuid.UU
 type WorkOrderOpts struct {
 	BaseBranch           string
 	RepoRoot             string
+	Description          string
 	AllowPublicAPIChange bool
 }
 

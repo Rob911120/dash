@@ -29,6 +29,19 @@ type AgentContextSnapshot struct {
 	PeersTotal     int
 	Constraints    []string
 	Live           LiveStatus
+	SystemPrompt   string   // Full system prompt text sent to LLM
+	RecentFiles    []string // Most recently touched files
+	TopFiles       []string // Most frequently touched files
+	WorkOrder      *WorkOrderSummary // Active work order for this agent
+}
+
+// WorkOrderSummary is a lightweight WO representation for the agent dashboard.
+type WorkOrderSummary struct {
+	Name        string
+	Status      string
+	Branch      string
+	ScopePaths  []string
+	Description string
 }
 
 // TaskSummary is a lightweight task representation for agent dashboard rendering.
@@ -66,12 +79,12 @@ func (d *Dash) AssembleAgentSnapshot(ctx context.Context, agentKey, mission stri
 	snap := &AgentContextSnapshot{
 		AgentKey:  agentKey,
 		FetchedAt: time.Now(),
-		Mission:   mission,
+		Role:      mission, // Agent's own mission from TUI (what it was told to do)
 	}
 
 	var maxUpdated time.Time
 
-	// Mission from graph (override if found)
+	// Global mission from graph
 	if node, err := d.QueryMission(ctx); err == nil && node != nil {
 		snap.Mission = node.Name
 		if data := parseNodeData(node); data != nil {
@@ -82,38 +95,53 @@ func (d *Dash) AssembleAgentSnapshot(ctx context.Context, agentKey, mission stri
 		trackMaxUpdated(&maxUpdated, node)
 	}
 
-	// Situation from context frame
-	if node, err := d.QueryContextFrame(ctx); err == nil && node != nil {
-		if data := parseNodeData(node); data != nil {
-			if focus, ok := data["current_focus"].(string); ok {
-				snap.Situation = focus
-			}
-			if snap.Situation == "" {
-				if t, ok := data["text"].(string); ok {
-					snap.Situation = t
+	// Active work order for this agent
+	if wo, err := d.GetActiveWorkOrderForAgent(ctx, agentKey); err == nil && wo != nil {
+		snap.WorkOrder = &WorkOrderSummary{
+			Name:        wo.Node.Name,
+			Status:      string(wo.Status),
+			Branch:      wo.BranchName,
+			ScopePaths:  wo.ScopePaths,
+			Description: wo.Description,
+		}
+		// WO description overrides situation if present
+		snap.Situation = wo.Description
+		if snap.Situation == "" {
+			snap.Situation = "Work order: " + wo.Node.Name + " [" + string(wo.Status) + "]"
+		}
+	}
+
+	// Fallback situation from context frame (only if no WO)
+	if snap.Situation == "" {
+		if node, err := d.QueryContextFrame(ctx); err == nil && node != nil {
+			if data := parseNodeData(node); data != nil {
+				if focus, ok := data["current_focus"].(string); ok {
+					snap.Situation = focus
+				}
+				if snap.Situation == "" {
+					if t, ok := data["text"].(string); ok {
+						snap.Situation = t
+					}
 				}
 			}
+			if snap.Situation == "" {
+				snap.Situation = node.Name
+			}
+			trackMaxUpdated(&maxUpdated, node)
 		}
-		if snap.Situation == "" {
-			snap.Situation = node.Name
-		}
-		trackMaxUpdated(&maxUpdated, node)
 	}
 
 	// Fetch all active agents once (used for role lookup + peers)
 	allAgents, _ := d.QueryActiveAgents(ctx)
 	trackMaxUpdated(&maxUpdated, allAgents...)
 
-	// Agent's own role
+	// Agent's own role from graph (supplement TUI mission if richer)
 	for _, a := range allAgents {
 		if a.Name == agentKey {
 			if data := parseNodeData(a); data != nil {
-				if desc, ok := data["description"].(string); ok {
+				if desc, ok := data["description"].(string); ok && desc != "" {
 					snap.Role = desc
 				}
-			}
-			if snap.Role == "" {
-				snap.Role = a.Name
 			}
 			break
 		}
@@ -201,6 +229,17 @@ func (d *Dash) AssembleAgentSnapshot(ctx context.Context, agentKey, mission stri
 		}
 		trackMaxUpdated(&maxUpdated, nodes...)
 	}
+
+	// Fetch agent's system prompt for display
+	profileName := "agent-continuous"
+	if agentKey == "orchestrator" {
+		profileName = "orchestrator"
+	}
+	promptText, _ := d.GetPrompt(ctx, profileName, PromptOptions{
+		AgentKey:     agentKey,
+		AgentMission: mission,
+	})
+	snap.SystemPrompt = promptText
 
 	// DB-based revision: 0 if no data (clear signal)
 	snap.Revision = maxUpdated.UnixMilli()

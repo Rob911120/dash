@@ -19,11 +19,12 @@ type contextMsg struct {
 }
 
 type dashDataMsg struct {
-	tasks    []dash.TaskWithDeps
-	sessions []dash.ActivitySummary
-	plans    []*dash.PlanState
-	services []serviceStatus
-	err      error
+	tasks      []dash.TaskWithDeps
+	sessions   []dash.ActivitySummary
+	plans      []*dash.PlanState
+	services   []serviceStatus
+	workOrders []*dash.WorkOrder
+	err        error
 }
 
 type intelMsg struct {
@@ -69,7 +70,8 @@ func fetchDashData(d *dash.Dash) tea.Cmd {
 		sessions, _ := d.RecentActivity(ctx, 5)
 		plans, _ := d.ListActivePlans(ctx)
 		services := checkServices()
-		return dashDataMsg{tasks: tasks, sessions: sessions, plans: plans, services: services}
+		workOrders, _ := d.ListActiveWorkOrders(ctx)
+		return dashDataMsg{tasks: tasks, sessions: sessions, plans: plans, services: services, workOrders: workOrders}
 	}
 }
 

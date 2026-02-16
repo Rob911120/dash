@@ -139,8 +139,13 @@ func waitForChatMsg(ch <-chan any) tea.Cmd {
 	}
 }
 
-// Stream sends messages via the LLM router.
+// Stream sends messages via the LLM router using all registered tools.
 func (c *chatClient) Stream(ctx context.Context, messages []chatMessage, ch chan<- any) {
+	c.StreamWithTools(ctx, messages, c.tools, ch)
+}
+
+// StreamWithTools sends messages via the LLM router with a specific set of tools.
+func (c *chatClient) StreamWithTools(ctx context.Context, messages []chatMessage, tools []map[string]any, ch chan<- any) {
 	defer close(ch)
 
 	// Convert cockpit chatMessages to router ChatMessages
@@ -163,7 +168,7 @@ func (c *chatClient) Stream(ctx context.Context, messages []chatMessage, ch chan
 		}
 	}
 
-	events := c.router.StreamWithModel(ctx, c.model, routerMsgs, c.tools)
+	events := c.router.StreamWithModel(ctx, c.model, routerMsgs, tools)
 
 	// Collect usage separately — EventUsage arrives BEFORE EventToolCall
 	// in the Anthropic SSE stream, so emitting chatDoneMsg from EventUsage

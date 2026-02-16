@@ -195,7 +195,7 @@ func resolveAgentViewKey(msg tea.KeyMsg) KeyAction {
 	switch msg.String() {
 	case "esc":
 		return ActionAgentBack
-	case "1", "2", "3", "4", "5", "6":
+	case "1", "2", "3", "4", "5", "6", "7":
 		return ActionAgentQuickSwitch
 	}
 	return ActionNone

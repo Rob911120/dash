@@ -16,7 +16,7 @@ Regler:
 5. När du är klar, sammanfatta vad du gjort och vad som återstår.
 6. Svara på svenska.',
   '{}',
-  '{agent_envelope,recent_decisions,pending_decisions,active_agents,constraints}',
+  '{agent_envelope,active_work_order,recent_decisions,pending_decisions,active_agents,constraints}',
   '{"recent_decisions":{"max_items":5},"pending_decisions":{"max_items":5}}'
 )
 ON CONFLICT (name) DO UPDATE SET

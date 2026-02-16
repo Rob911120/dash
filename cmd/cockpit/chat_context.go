@@ -312,6 +312,10 @@ func (m *chatModel) systemPrompt() string {
 	var opts dash.PromptOptions
 
 	switch {
+	case m.scopedAgent == "orchestrator":
+		profileName = "orchestrator"
+		opts.AgentKey = m.scopedAgent
+		opts.AgentMission = m.agentMission
 	case m.scopedAgent != "":
 		profileName = "agent-continuous"
 		opts.AgentKey = m.scopedAgent
@@ -347,6 +351,26 @@ func (m *chatModel) continuationPrompt() string {
 	}
 
 	b.WriteString("VERKTYG: working_set, query, remember, node, tasks\n")
+
+	// Active work order nudge for agents
+	if m.scopedAgent != "" && m.d != nil {
+		wo, _ := m.d.GetActiveWorkOrderForAgent(context.Background(), m.scopedAgent)
+		if wo != nil {
+			b.WriteString(fmt.Sprintf("WORK ORDER: %s [%s]", wo.Node.Name, wo.Status))
+			if wo.BranchName != "" {
+				b.WriteString(fmt.Sprintf(" branch:%s", wo.BranchName))
+			}
+			b.WriteString("\n")
+		}
+	}
+
+	// File nudge: most recent + most frequent
+	if m.lastFile != "" {
+		b.WriteString(fmt.Sprintf("SENASTE FIL: %s\n", m.lastFile))
+	}
+	if m.topFile != "" && m.topFile != m.lastFile {
+		b.WriteString(fmt.Sprintf("VANLIGASTE FIL: %s\n", m.topFile))
+	}
 
 	if pct := m.meter.pct(); pct >= 70 {
 		b.WriteString(fmt.Sprintf("CONTEXT: %d%% — sammanfatta snart.\n", pct))

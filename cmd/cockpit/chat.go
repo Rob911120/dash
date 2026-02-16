@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -44,6 +45,10 @@ type chatModel struct {
 	agentMission string
 	meter         tokenMeter
 	lastMaxScroll int // tracks if user was at bottom last render
+
+	lastFile string // most recently touched file (from tool results)
+	topFile  string // most frequently touched file
+	fileCounts map[string]int // file frequency tracker
 }
 
 // chatToolResultReady is sent when tool execution completes.
@@ -85,6 +90,11 @@ func (m *chatModel) Update(msg tea.Msg, width, height int) tea.Cmd {
 		var names []string
 		for _, c := range msg.calls {
 			names = append(names, c.Name)
+			// Track file paths from tool call args
+			var args map[string]any
+			if json.Unmarshal([]byte(c.ArgsBuf.String()), &args) == nil {
+				m.trackFileFromTool(c.Name, args)
+			}
 		}
 		limitStr := fmt.Sprintf("%d", m.maxToolIter)
 		if m.maxToolIter == 0 {
@@ -320,6 +330,12 @@ func (m *chatModel) startStream() tea.Cmd {
 		m.meter.limit = m.client.contextLimit()
 	}
 
+	// Filter tools per profile toolset
+	tools := m.client.tools
+	if filtered := m.filteredTools(); filtered != nil {
+		tools = filtered
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	ch := make(chan any, 64)
 	m.streaming = true
@@ -329,8 +345,51 @@ func (m *chatModel) startStream() tea.Cmd {
 	m.cancelFn = cancel
 	m.scrollToBottom()
 
-	go m.client.Stream(ctx, apiMsgs, ch)
+	go m.client.StreamWithTools(ctx, apiMsgs, tools, ch)
 	return waitForChatMsg(ch)
+}
+
+// filteredTools returns tools filtered by the current profile's toolset,
+// or nil if no filtering should be applied (empty toolset = all tools).
+func (m *chatModel) filteredTools() []map[string]any {
+	if m.d == nil || m.client == nil {
+		return nil
+	}
+
+	var profileName string
+	switch {
+	case m.scopedAgent == "orchestrator":
+		profileName = "orchestrator"
+	case m.scopedAgent != "":
+		profileName = "agent-continuous"
+	default:
+		return nil // default/compact profiles use all tools
+	}
+
+	profile, err := m.d.GetProfile(context.Background(), profileName)
+	if err != nil || profile == nil || len(profile.Toolset) == 0 {
+		return nil
+	}
+
+	// Build allowed tool set
+	allowed := make(map[string]bool, len(profile.Toolset))
+	for _, t := range profile.Toolset {
+		allowed[t] = true
+	}
+
+	// Filter tools
+	var filtered []map[string]any
+	for _, tool := range m.client.tools {
+		fn, ok := tool["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		name, _ := fn["name"].(string)
+		if allowed[name] {
+			filtered = append(filtered, tool)
+		}
+	}
+	return filtered
 }
 
 

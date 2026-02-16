@@ -176,6 +176,17 @@ func llmDebugLog(prov ProviderConfig, model string, messages []ChatMessage, tool
 	}
 }
 
+// llmDebugLogPayloadSize logs the serialized request body size.
+func llmDebugLogPayloadSize(format, model string, bodyBytes []byte, toolCount int) {
+	f, err := os.OpenFile("debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	dbg := log.New(f, "[llm-payload] ", 0)
+	dbg.Printf("format=%s model=%s payload_bytes=%d tools=%d", format, model, len(bodyBytes), toolCount)
+}
+
 // --- Streaming ---
 
 // Stream sends a streaming chat completion for the given role and returns a channel of events.

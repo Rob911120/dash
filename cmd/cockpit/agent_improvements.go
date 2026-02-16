@@ -22,6 +22,14 @@ var (
 
 // Agent missions based on their type
 var agentMissions = map[string]string{
+	"orchestrator": `Du är ORKESTRATORN — den centrala pipeline-managern i Dash.
+Ditt ansvar:
+- Utvärdera uppgifter och skapa WorkOrders
+- Tilldela till rätt sub-agent
+- Övervaka progress, köra build gate och synthesis
+- Besluta merge/reject
+Använd work_order, build_gate, pipeline och spawn_agent verktygen.`,
+
 	"cockpit-backend": `Du är en backend-specialist för Dash cockpit.
 Fokusera på:
 - Go-kod och arkitektur i /dash/cmd/cockpit

@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
+	"time"
 )
 
 // --- Anthropic-format types ---
@@ -236,16 +238,28 @@ func streamAnthropic(ctx context.Context, client *http.Client, prov ProviderConf
 		return
 	}
 
-	req, err := newProviderRequest(ctx, prov, "POST", "/messages", bytes.NewReader(bodyBytes))
-	if err != nil {
-		ch <- StreamEvent{Type: EventError, Error: err}
-		return
+	if os.Getenv("DASH_LLM_DEBUG") != "" {
+		llmDebugLogPayloadSize("anthropic", model, bodyBytes, len(tools))
 	}
 
-	resp, err := client.Do(req)
-	if err != nil {
-		ch <- StreamEvent{Type: EventError, Error: fmt.Errorf("http: %w", err)}
-		return
+	var resp *http.Response
+	for attempt := 0; attempt < 2; attempt++ {
+		req, err := newProviderRequest(ctx, prov, "POST", "/messages", bytes.NewReader(bodyBytes))
+		if err != nil {
+			ch <- StreamEvent{Type: EventError, Error: err}
+			return
+		}
+
+		resp, err = client.Do(req)
+		if err != nil {
+			if attempt == 0 && isTransientEOF(err) {
+				time.Sleep(500 * time.Millisecond)
+				continue
+			}
+			ch <- StreamEvent{Type: EventError, Error: fmt.Errorf("http: %w", err)}
+			return
+		}
+		break
 	}
 	defer resp.Body.Close()
 
