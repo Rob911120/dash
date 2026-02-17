@@ -314,6 +314,11 @@ func registerBuiltinTools(d *Dash) {
 		d.registry.Register(defSpawnAgent())
 		d.registry.Register(defAgentStatus())
 		d.registry.Register(defUpdateAgentStatus())
+		// Cross-agent communication
+		d.registry.Register(defAskAgent())
+		d.registry.Register(defAnswerQuery())
+		// Planner delegation
+		d.registry.Register(defGiveToPlanner())
 		// Filesystem
 		d.registry.Register(defRead())
 		d.registry.Register(defWrite())

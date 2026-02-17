@@ -41,16 +41,6 @@ type serviceStatus struct {
 
 type tickMsg time.Time
 
-type taskContextReadyMsg struct {
-	taskName string
-	err      error
-}
-
-type planContextReadyMsg struct {
-	planName string
-	err      error
-}
-
 // --- Fetchers ---
 
 func fetchContext(d *dash.Dash) tea.Cmd {
@@ -82,24 +72,6 @@ func fetchIntel(d *dash.Dash) tea.Cmd {
 		proposals, _ := d.GenerateProposals(ctx)
 		tree, _ := d.GetHierarchyTree(ctx)
 		return intelMsg{proposals: proposals, tree: tree}
-	}
-}
-
-func refreshTaskContext(d *dash.Dash, taskName string) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_, err := d.GetPrompt(ctx, "task", dash.PromptOptions{TaskName: taskName})
-		return taskContextReadyMsg{taskName: taskName, err: err}
-	}
-}
-
-func refreshPlanContext(d *dash.Dash, planName string) tea.Cmd {
-	return func() tea.Msg {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		_, err := d.GetPrompt(ctx, "execution", dash.PromptOptions{PlanName: planName})
-		return planContextReadyMsg{planName: planName, err: err}
 	}
 }
 

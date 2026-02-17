@@ -1,6 +1,9 @@
 package main
 
-import tea "github.com/charmbracelet/bubbletea"
+import (
+	"github.com/charmbracelet/bubbles/key"
+	tea "github.com/charmbracelet/bubbletea"
+)
 
 // KeyAction represents a resolved keyboard action.
 type KeyAction int
@@ -31,10 +34,8 @@ const (
 	ActionScrollDown
 	ActionCancelStream
 	ActionToggleReasoning
+	ActionToggleToolCollapse
 	ActionClearChat
-	ActionExitScope
-	ActionRunModeContinue
-	ActionExitRunMode
 
 	// Model switching
 	ActionModelNext
@@ -57,10 +58,11 @@ const (
 	ActionDashSpawn
 	ActionDashToolLimit
 	ActionDashClearContinue
+	ActionDashFilter
 
 	// Agent view actions
-	ActionAgentQuickSwitch
 	ActionAgentBack
+	ActionPauseAgent
 )
 
 // resolveGlobalKey maps global key events that apply regardless of view.
@@ -81,7 +83,7 @@ func resolveGlobalKey(msg tea.KeyMsg) KeyAction {
 }
 
 // resolveChatKey maps key events for the chat view.
-// mode: "streaming", "runMode", "normal"
+// mode: "streaming", "normal"
 func resolveChatKey(msg tea.KeyMsg, mode string) KeyAction {
 	// Scroll is always available
 	switch msg.Type {
@@ -101,16 +103,6 @@ func resolveChatKey(msg tea.KeyMsg, mode string) KeyAction {
 		}
 		return ActionNone
 
-	case "runMode":
-		switch msg.String() {
-		case "enter":
-			return ActionRunModeContinue
-		case "ctrl+o":
-			return ActionToggleReasoning
-		case "esc":
-			return ActionExitRunMode
-		}
-		return ActionNone
 	}
 
 	// Normal mode
@@ -144,8 +136,8 @@ func resolveChatKey(msg tea.KeyMsg, mode string) KeyAction {
 		return ActionClearChat
 	case "ctrl+o":
 		return ActionToggleReasoning
-	case "esc":
-		return ActionExitScope
+	case "ctrl+t":
+		return ActionToggleToolCollapse
 	}
 
 	return ActionNone
@@ -186,6 +178,8 @@ func resolveDashKey(msg tea.KeyMsg) KeyAction {
 		return ActionDashToolLimit
 	case "c":
 		return ActionDashClearContinue
+	case "/":
+		return ActionDashFilter
 	}
 	return ActionNone
 }
@@ -195,8 +189,48 @@ func resolveAgentViewKey(msg tea.KeyMsg) KeyAction {
 	switch msg.String() {
 	case "esc":
 		return ActionAgentBack
-	case "1", "2", "3", "4", "5", "6", "7":
-		return ActionAgentQuickSwitch
+	case "ctrl+p":
+		return ActionPauseAgent
 	}
 	return ActionNone
 }
+
+// --- Bubbles help.KeyMap for chat ---
+
+type chatKeyMap struct {
+	Send      key.Binding
+	Clear     key.Binding
+	Tools     key.Binding
+	Reasoning key.Binding
+	Scroll    key.Binding
+	Model     key.Binding
+	Stop      key.Binding
+}
+
+func newChatKeyMap() chatKeyMap {
+	return chatKeyMap{
+		Send:      key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "send")),
+		Clear:     key.NewBinding(key.WithKeys("ctrl+l"), key.WithHelp("ctrl+l", "clear")),
+		Tools:     key.NewBinding(key.WithKeys("ctrl+t"), key.WithHelp("ctrl+t", "tools")),
+		Reasoning: key.NewBinding(key.WithKeys("ctrl+o"), key.WithHelp("ctrl+o", "thinking")),
+		Scroll:    key.NewBinding(key.WithKeys("pgup", "pgdn"), key.WithHelp("pgup/dn", "scroll")),
+		Model:     key.NewBinding(key.WithKeys("å", "ä"), key.WithHelp("tab+å/ä", "model")),
+		Stop:      key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "stop")),
+	}
+}
+
+func (k chatKeyMap) ShortHelp() []key.Binding {
+	return []key.Binding{k.Send, k.Clear, k.Tools, k.Reasoning, k.Scroll, k.Model}
+}
+
+func (k chatKeyMap) FullHelp() [][]key.Binding {
+	return [][]key.Binding{
+		{k.Send, k.Clear, k.Tools},
+		{k.Reasoning, k.Scroll, k.Model},
+	}
+}
+
+func (k chatKeyMap) StreamingHelp() []key.Binding {
+	return []key.Binding{k.Stop, k.Reasoning}
+}
+

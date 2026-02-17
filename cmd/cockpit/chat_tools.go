@@ -45,10 +45,14 @@ func (m *chatModel) trackFileFromTool(toolName string, args map[string]any) {
 func (m *chatModel) executeTools(calls []streamToolCall) tea.Cmd {
 	d := m.d
 	sessionID := m.sessionID
+	callerKey := m.scopedAgent
 	return func() tea.Msg {
 		ctx := context.Background()
 		var toolResults []chatMessage
 		var spawnInfo *agentSpawnInfo
+		var askQuery *pendingQuery
+		var planReqInfo *planRequestInfo
+		var answerQueryID, answerText string
 		for _, c := range calls {
 			var args map[string]any
 			if err := json.Unmarshal([]byte(c.ArgsBuf.String()), &args); err != nil {
@@ -57,6 +61,18 @@ func (m *chatModel) executeTools(calls []streamToolCall) tea.Cmd {
 
 			var resultText string
 			if d != nil {
+				// Self-ask guard
+				if c.Name == "ask_agent" {
+					target, _ := args["target"].(string)
+					if target == callerKey {
+						resultText = `{"error": "cannot ask yourself"}`
+						toolResults = append(toolResults, chatMessage{
+							Role: "tool", Name: c.Name, Content: resultText, ToolCallID: c.ID,
+						})
+						continue
+					}
+				}
+
 				result := d.RunTool(ctx, c.Name, args, &dash.ToolOpts{
 					SessionID: sessionID,
 					CallerID:  "cockpit",
@@ -68,6 +84,29 @@ func (m *chatModel) executeTools(calls []streamToolCall) tea.Cmd {
 					// Detect spawn_agent results
 					if c.Name == "spawn_agent" {
 						spawnInfo = parseSpawnResult(resultText)
+					}
+					// Detect give_to_planner results
+					if c.Name == "give_to_planner" {
+						if info := parsePlanRequestResult(resultText); info != nil {
+							desc, _ := args["description"].(string)
+							info.desc = desc
+							info.context, _ = args["context"].(string)
+							info.priority, _ = args["priority"].(string)
+							planReqInfo = info
+						}
+					}
+					// Detect ask_agent results
+					if c.Name == "ask_agent" {
+						if q := parseAskResult(resultText, c.ID); q != nil {
+							q.callerKey = callerKey
+							askQuery = q
+						}
+					}
+					// Detect answer_query results
+					if c.Name == "answer_query" {
+						answerQueryID, _ = parseAnswerResult(resultText)
+						answerRaw, _ := args["answer"].(string)
+						answerText = answerRaw
 					}
 				} else {
 					resultText = fmt.Sprintf("Error: %s", result.Error)
@@ -88,6 +127,32 @@ func (m *chatModel) executeTools(calls []streamToolCall) tea.Cmd {
 			})
 		}
 
+		// Priority: answer > ask > planRequest > spawn > normal
+		if answerQueryID != "" {
+			return chatToolResultWithAnswer{
+				results: toolResults,
+				calls:   calls,
+				queryID: answerQueryID,
+				answer:  answerText,
+			}
+		}
+		if askQuery != nil {
+			return chatToolResultWithAsk{
+				results: toolResults,
+				calls:   calls,
+				query:   *askQuery,
+			}
+		}
+		if planReqInfo != nil {
+			return chatToolResultWithPlanRequest{
+				results:   toolResults,
+				calls:     calls,
+				requestID: planReqInfo.requestID,
+				desc:      planReqInfo.desc,
+				context:   planReqInfo.context,
+				priority:  planReqInfo.priority,
+			}
+		}
 		if spawnInfo != nil {
 			return chatToolResultWithSpawn{
 				results: toolResults,

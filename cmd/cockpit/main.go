@@ -42,6 +42,7 @@ func main() {
 		router.UpdateConfig(graphCfg)
 	}
 	d.EnsureProjectDefaults(ctx)
+	dash.EnsureDefaultAgents(ctx, d)
 	cancel()
 
 	chatCl := newChatClient(router)

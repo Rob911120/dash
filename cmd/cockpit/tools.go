@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/x/ansi"
 )
 
 // toolIcon returns an icon per tool name.
@@ -17,6 +19,36 @@ var toolIcon = map[string]string{
 	"gc": "\u267b", "embed": "\u25c8",
 	"read": "\u25b8", "write": "\u25b9", "edit": "\u270e", "grep": "\u2315",
 	"glob": "\u229b", "ls": "\u25a6", "mkdir": "\u25a3", "exec": "\u26a1",
+}
+
+// renderToolBadge renders a tool call as a compact one-line badge: [✔] icon name(args) - summary
+func renderToolBadge(tc toolCall, result string, maxWidth int) string {
+	icon := toolIcon[tc.Function.Name]
+	if icon == "" {
+		icon = "\u2022"
+	}
+	argSummary := formatToolArgs(tc.Function.Name, tc.Function.Arguments)
+	header := icon + " " + tc.Function.Name
+	if argSummary != "" {
+		header += "(" + argSummary + ")"
+	}
+
+	// Extract short result summary
+	summary := ""
+	if result != "" {
+		lines := formatToolResult(tc.Function.Name, result, maxWidth)
+		if len(lines) > 0 {
+			summary = ansi.Strip(lines[0])
+		}
+	}
+
+	badge := header
+	if summary != "" {
+		badge += " \u2192 " + summary
+	}
+
+	status := textSuccess.Render("[\u2714]")
+	return status + " " + toolBoxDim.Render(truncate(badge, maxWidth-5))
 }
 
 func renderToolBox(tc toolCall, result string, boxWidth int) string {
@@ -415,10 +447,13 @@ func firstString(m map[string]any, keys ...string) string {
 }
 
 func truncate(s string, max int) string {
-	if len(s) <= max || max < 4 {
+	if max < 4 {
 		return s
 	}
-	return s[:max-3] + "..."
+	if ansi.StringWidth(s) <= max {
+		return s
+	}
+	return ansi.Truncate(s, max-3, "...")
 }
 
 func shortenPath(path string) string {
@@ -432,7 +467,7 @@ func wrapText(text string, width int) string {
 	}
 	var lines []string
 	for _, paragraph := range strings.Split(text, "\n") {
-		if len(paragraph) <= width {
+		if ansi.StringWidth(paragraph) <= width {
 			lines = append(lines, paragraph)
 			continue
 		}
@@ -441,7 +476,7 @@ func wrapText(text string, width int) string {
 		for _, w := range words {
 			if line == "" {
 				line = w
-			} else if len(line)+1+len(w) <= width {
+			} else if ansi.StringWidth(line)+1+ansi.StringWidth(w) <= width {
 				line += " " + w
 			} else {
 				lines = append(lines, line)

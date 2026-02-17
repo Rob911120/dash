@@ -14,14 +14,16 @@ import (
 
 // AgentSession represents a spawned agent session in the graph.
 type AgentSession struct {
-	ID        string    `json:"id"`
-	AgentKey  string    `json:"agent_key"`
-	Name      string    `json:"name"`
-	Mission   string    `json:"mission"`
-	Status    string    `json:"status"`
-	SpawnedBy string    `json:"spawned_by"`
-	SpawnedAt time.Time `json:"spawned_at"`
-	SessionID string    `json:"session_id,omitempty"`
+	ID              string    `json:"id"`
+	AgentKey        string    `json:"agent_key"`
+	Name            string    `json:"name"`
+	Mission         string    `json:"mission"`
+	Status          string    `json:"status"`
+	SpawnedBy       string    `json:"spawned_by"`
+	SpawnedAt       time.Time `json:"spawned_at"`
+	SessionID       string    `json:"session_id,omitempty"`
+	Controller      string    `json:"controller"`         // "human", "llm", "idle"
+	ControllerSince time.Time `json:"controller_since"`
 }
 
 // defSpawnAgent creates the spawn_agent tool definition.
@@ -79,12 +81,15 @@ func handleSpawnAgent(ctx context.Context, d *Dash, args map[string]any) (any, e
 	}
 
 	// Create agent session node
+	now := time.Now().UTC()
 	nodeData := map[string]any{
-		"agent_key":     agentKey,
-		"mission":       mission,
-		"status":        "spawned",
-		"spawned_at":    time.Now().UTC().Format(time.RFC3339),
-		"context_hints": hints,
+		"agent_key":        agentKey,
+		"mission":          mission,
+		"status":           "spawned",
+		"spawned_at":       now.Format(time.RFC3339),
+		"context_hints":    hints,
+		"controller":       "idle",
+		"controller_since": now.Format(time.RFC3339),
 	}
 
 	node, err := d.GetOrCreateNode(ctx, LayerContext, "agent_session", sessionID, nodeData)
@@ -208,6 +213,14 @@ func handleAgentStatus(ctx context.Context, d *Dash, args map[string]any) (any, 
 		if v, ok := data["spawned_by"].(string); ok {
 			agent.SpawnedBy = v
 		}
+		if v, ok := data["controller"].(string); ok {
+			agent.Controller = v
+		}
+		if v, ok := data["controller_since"].(string); ok {
+			if t, err := time.Parse(time.RFC3339, v); err == nil {
+				agent.ControllerSince = t
+			}
+		}
 
 		agents = append(agents, agent)
 	}
@@ -251,11 +264,108 @@ func defUpdateAgentStatus() *ToolDef {
 	}
 }
 
+// defAskAgent creates the ask_agent tool for cross-agent communication.
+func defAskAgent() *ToolDef {
+	return &ToolDef{
+		Name:        "ask_agent",
+		Description: "Ställ en fråga till en annan agent. Frågan dispatchar till target-agenten som svarar med answer_query. Du får svaret tillbaka som tool result.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"target": map[string]any{
+					"type":        "string",
+					"description": "Agent-nyckel att fråga (t.ex. 'database-agent', 'cockpit-backend').",
+				},
+				"question": map[string]any{
+					"type":        "string",
+					"description": "Frågan att ställa till target-agenten.",
+				},
+			},
+			"required": []string{"target", "question"},
+		},
+		Fn:   handleAskAgent,
+		Tags: []string{"write", "graph"},
+	}
+}
+
+func handleAskAgent(ctx context.Context, d *Dash, args map[string]any) (any, error) {
+	target, _ := args["target"].(string)
+	question, _ := args["question"].(string)
+
+	if target == "" || question == "" {
+		return nil, fmt.Errorf("target and question are required")
+	}
+
+	queryID := fmt.Sprintf("query-%d-%s", time.Now().UnixMilli(), target)
+
+	// Store observation for audit trail
+	_ = d.StoreObservation(ctx, "", "agent_query", map[string]any{
+		"query_id": queryID,
+		"target":   target,
+		"question": question,
+		"status":   "dispatched",
+	})
+
+	return map[string]any{
+		"query_id": queryID,
+		"target":   target,
+		"question": question,
+		"status":   "dispatched",
+	}, nil
+}
+
+// defAnswerQuery creates the answer_query tool for responding to cross-agent queries.
+func defAnswerQuery() *ToolDef {
+	return &ToolDef{
+		Name:        "answer_query",
+		Description: "Svara på en fråga från en annan agent. Använd detta när du fått en fråga via ask_agent och har ett svar. Svaret routas tillbaka till den frågande agenten.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query_id": map[string]any{
+					"type":        "string",
+					"description": "Query-ID från frågan du svarar på.",
+				},
+				"answer": map[string]any{
+					"type":        "string",
+					"description": "Ditt svar på frågan.",
+				},
+			},
+			"required": []string{"query_id", "answer"},
+		},
+		Fn:   handleAnswerQuery,
+		Tags: []string{"write", "graph"},
+	}
+}
+
+func handleAnswerQuery(ctx context.Context, d *Dash, args map[string]any) (any, error) {
+	queryID, _ := args["query_id"].(string)
+	answer, _ := args["answer"].(string)
+
+	if queryID == "" || answer == "" {
+		return nil, fmt.Errorf("query_id and answer are required")
+	}
+
+	// Store observation for audit trail
+	_ = d.StoreObservation(ctx, "", "agent_answer", map[string]any{
+		"query_id": queryID,
+		"answer":   answer,
+		"status":   "answered",
+	})
+
+	return map[string]any{
+		"query_id": queryID,
+		"ok":       true,
+	}, nil
+}
+
 func handleUpdateAgent(ctx context.Context, d *Dash, args map[string]any) (any, error) {
 	sessionID, _ := args["agent_session_id"].(string)
 	status, _ := args["status"].(string)
 	progress, _ := args["progress"].(string)
 	blocker, _ := args["blocker"].(string)
+	controller, hasController := args["controller"].(string)
+	controllerSince, _ := args["controller_since"].(string)
 
 	// Find the agent session node
 	node, err := d.GetNodeByName(ctx, LayerContext, "agent_session", sessionID)
@@ -273,6 +383,14 @@ func handleUpdateAgent(ctx context.Context, d *Dash, args map[string]any) (any, 
 	}
 	if blocker != "" {
 		updates["blocker"] = blocker
+	}
+	if hasController {
+		updates["controller"] = controller
+		if controllerSince != "" {
+			updates["controller_since"] = controllerSince
+		} else {
+			updates["controller_since"] = time.Now().UTC().Format(time.RFC3339)
+		}
 	}
 
 	if err := d.UpdateNodeData(ctx, node, updates); err != nil {

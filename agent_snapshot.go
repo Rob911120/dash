@@ -33,6 +33,7 @@ type AgentContextSnapshot struct {
 	RecentFiles    []string // Most recently touched files
 	TopFiles       []string // Most frequently touched files
 	WorkOrder      *WorkOrderSummary // Active work order for this agent
+	Controller     string   // "human", "llm", "idle"
 }
 
 // WorkOrderSummary is a lightweight WO representation for the agent dashboard.

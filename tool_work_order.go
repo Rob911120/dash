@@ -16,6 +16,7 @@ var knownAgentKeys = []string{
 	"database-agent",
 	"system-agent",
 	"shift-agent",
+	"planner-agent",
 }
 
 // validateAgentKey checks that an agent key matches a registered agent.
@@ -31,7 +32,7 @@ func validateAgentKey(key string) error {
 func defWorkOrder() *ToolDef {
 	return &ToolDef{
 		Name:        "work_order",
-		Description: "Hantera work orders i pipeline. Actions: create, assign, advance, list, get. Agent keys: orchestrator, cockpit-backend, cockpit-frontend, systemprompt-agent, database-agent, system-agent, shift-agent.",
+		Description: "Hantera work orders i pipeline. Actions: create, assign, advance, list, get. Agent keys: orchestrator, cockpit-backend, cockpit-frontend, systemprompt-agent, database-agent, system-agent, shift-agent, planner-agent.",
 		InputSchema: map[string]any{
 			"type":     "object",
 			"required": []string{"action"},

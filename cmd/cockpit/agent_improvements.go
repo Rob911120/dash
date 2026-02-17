@@ -20,59 +20,6 @@ var (
 	colorBlue   = lipgloss.Color("#22D3EE")  // cCyan
 )
 
-// Agent missions based on their type
-var agentMissions = map[string]string{
-	"orchestrator": `Du är ORKESTRATORN — den centrala pipeline-managern i Dash.
-Ditt ansvar:
-- Utvärdera uppgifter och skapa WorkOrders
-- Tilldela till rätt sub-agent
-- Övervaka progress, köra build gate och synthesis
-- Besluta merge/reject
-Använd work_order, build_gate, pipeline och spawn_agent verktygen.`,
-
-	"cockpit-backend": `Du är en backend-specialist för Dash cockpit.
-Fokusera på:
-- Go-kod och arkitektur i /dash/cmd/cockpit
-- Integration med Dash core APIs
-- Performance och stabilitet
-- Databasinteraktioner`,
-
-	"cockpit-frontend": `Du är en frontend-specialist för Dash cockpit TUI.
-Fokusera på:
-- Bubble Tea komponenter och rendering
-- Användarupplevelse och interaktivitet
-- Tangentbordsnavigering
-- Visuell feedback och animationer`,
-
-	"systemprompt-agent": `Du är en prompt engineering specialist.
-Fokusera på:
-- Optimera system prompts för olika agenter
-- Skapa tydliga och effektiva instruktioner
-- Anpassa prompts för specifika uppgifter
-- Testa och iterera på prompt-förbättringar`,
-
-	"database-agent": `Du är en databasspecialist för Dash.
-Fokusera på:
-- PostgreSQL schema och migrations
-- Query-optimering
-- Index-strategier
-- Data integrity och constraints`,
-
-	"system-agent": `Du är en systemarkitekt för Dash.
-Fokusera på:
-- Övergripande systemdesign
-- API-kontrakt och interfaces
-- Modularitet och separation of concerns
-- Performance och skalbarhet`,
-
-	"shift-agent": `Du är en handoff-specialist.
-Din uppgift är att:
-- Sammanfatta pågående arbete
-- Identifiera nästa steg
-- Förbereda kontext för nästa agent/session
-- Dokumentera viktiga beslut och insikter`,
-}
-
 // agentStatusUpdateMsg updates agent status in the UI
 type agentStatusUpdateMsg struct {
 	agentID string
@@ -88,21 +35,19 @@ type agentProgressMsg struct {
 
 // Enhanced spawn with automatic mission assignment
 func (m *model) spawnAgentWithMission(agentKey string) tea.Cmd {
-	return func() tea.Msg {
-		// Get mission for this agent type
-		mission, ok := agentMissions[agentKey]
-		if !ok {
-			mission = fmt.Sprintf("Du är en %s agent. Analysera koden och föreslå förbättringar.", agentKey)
-		}
-
-		// Find a good display name
-		displayName := agentKey
-		for _, a := range AvailableAgents {
-			if a.Key == agentKey {
-				displayName = a.DisplayName
-				break
+	// Resolve mission and display name from DB-loaded defs
+	mission := fmt.Sprintf("Du är en %s agent. Analysera koden och föreslå förbättringar.", agentKey)
+	displayName := agentKey
+	for _, def := range m.allAgentDefs {
+		if def.Key == agentKey {
+			if def.Mission != "" {
+				mission = def.Mission
 			}
+			displayName = def.DisplayName
+			break
 		}
+	}
+	return func() tea.Msg {
 
 		// Call the dash spawn_agent tool
 		args := map[string]any{
@@ -208,27 +153,6 @@ func (at *agentTab) renderStatus() string {
 	}
 
 	return strings.Join(parts, " · ")
-}
-
-// Quick agent switching with number keys
-func (m *model) handleAgentQuickSwitch(key string) (tea.Model, tea.Cmd) {
-	if m.state != viewAgent {
-		return m, nil
-	}
-
-	// Alt+1 through Alt+9 to switch between spawned agents
-	if len(key) == 1 && key[0] >= '1' && key[0] <= '9' {
-		idx := int(key[0] - '1')
-		if idx < m.agents.count() {
-			m.agents.activate(idx)
-			// Update status to active
-			if tab := m.agents.active(); tab != nil {
-				tab.status = agentActive
-				return m, m.updateAgentStatus(tab.id, tab.sessionID, agentActive)
-			}
-		}
-	}
-	return m, nil
 }
 
 // handleToolCall executes a tool via Dash and returns the result.

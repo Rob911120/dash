@@ -9,6 +9,9 @@ import (
 
 	"dash"
 
+	"github.com/charmbracelet/bubbles/help"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -26,29 +29,29 @@ type chatModel struct {
 	streamCh     <-chan any
 	cancelFn     context.CancelFunc
 
-	scrollY int
-	lines   int
-	width   int
-	height  int
+	viewport     viewport.Model
+	thinkSpinner spinner.Model
+	width        int
+	height       int
 
-	errMsg        string
-	toolStatus    string
-	toolIter      int // counts consecutive tool call rounds
-	maxToolIter   int // 0 = unlimited, default 5
-	showReasoning bool
-	runMode       bool
-
-	scopedPlan string
-	scopedTask string
+	errMsg         string
+	toolStatus     string
+	toolIter       int // counts consecutive tool call rounds
+	maxToolIter    int // 0 = unlimited, default 5
+	showReasoning  bool
+	toolsCollapsed bool
 
 	scopedAgent  string
 	agentMission string
-	meter         tokenMeter
-	lastMaxScroll int // tracks if user was at bottom last render
+	meter        tokenMeter
+	helpModel    help.Model
+	keyMap       chatKeyMap
 
 	lastFile string // most recently touched file (from tool results)
 	topFile  string // most frequently touched file
 	fileCounts map[string]int // file frequency tracker
+
+	answeringQueryInfo *pendingQuery // non-nil when this chat is answering a cross-agent query
 }
 
 // chatToolResultReady is sent when tool execution completes.
@@ -65,16 +68,44 @@ type chatToolResultWithSpawn struct {
 }
 
 func newChatModel(client *chatClient, d *dash.Dash, sessionID string) *chatModel {
-	return &chatModel{client: client, d: d, sessionID: sessionID, maxToolIter: 5}
+	vp := viewport.New(0, 0)
+	vp.MouseWheelEnabled = true
+	vp.KeyMap = viewport.KeyMap{} // Disable built-in keys — we handle scroll explicitly
+	sp := spinner.New()
+	sp.Spinner = spinner.Dot
+	sp.Style = reasoningLabel
+	h := help.New()
+	h.Styles.ShortKey = textDim
+	h.Styles.ShortDesc = textDim
+	h.Styles.ShortSeparator = textDim
+	return &chatModel{client: client, d: d, sessionID: sessionID, maxToolIter: 0, viewport: vp, thinkSpinner: sp, helpModel: h, keyMap: newChatKeyMap()}
 }
 
 func (m *chatModel) Update(msg tea.Msg, width, height int) tea.Cmd {
 	m.width = width
 	m.height = height
 
+	// Resize viewport
+	vpH := height - 2 // room for scope header + input line
+	if vpH < 1 {
+		vpH = 1
+	}
+	m.viewport.Width = width
+	m.viewport.Height = vpH
+
 	switch msg := msg.(type) {
 	case tea.MouseMsg:
-		return m.handleMouse(tea.MouseEvent(msg))
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		return cmd
+
+	case spinner.TickMsg:
+		if m.streaming {
+			var cmd tea.Cmd
+			m.thinkSpinner, cmd = m.thinkSpinner.Update(msg)
+			return cmd
+		}
+		return nil
 
 	case chatReasoningMsg:
 		m.reasoningBuf += msg.chunk
@@ -211,32 +242,24 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	mode := "normal"
 	if m.streaming {
 		mode = "streaming"
-	} else if m.runMode {
-		mode = "runMode"
 	}
 
 	action := resolveChatKey(msg, mode)
 	switch action {
 	case ActionScrollUp:
-		m.scrollUp(m.height / 2)
-		return func() tea.Msg { return tickMsg{} }
+		m.viewport.HalfViewUp()
+		return nil
 	case ActionScrollDown:
-		m.scrollDown(m.height / 2)
-		return func() tea.Msg { return tickMsg{} }
+		m.viewport.HalfViewDown()
+		return nil
 	case ActionCancelStream:
 		if m.cancelFn != nil {
 			m.cancelFn()
 		}
 	case ActionToggleReasoning:
 		m.showReasoning = !m.showReasoning
-	case ActionRunModeContinue:
-		m.messages = append(m.messages, chatMessage{
-			Role: "user", Content: "Fortsätt med nästa steg.",
-		})
-		return m.startStream()
-	case ActionExitRunMode:
-		m.runMode = false
-		m.scopedPlan = ""
+	case ActionToggleToolCollapse:
+		m.toolsCollapsed = !m.toolsCollapsed
 	case ActionSendMessage:
 		return m.sendMessage()
 	case ActionDeleteCharBack:
@@ -283,18 +306,7 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case ActionClearChat:
 		m.messages = nil
 		m.errMsg = ""
-		m.scrollY = 0
-		m.runMode = false
-		m.scopedPlan = ""
-		m.scopedTask = ""
-	case ActionExitScope:
-		if m.scopedTask != "" || m.scopedPlan != "" {
-			m.scopedTask = ""
-			m.scopedPlan = ""
-			m.messages = nil
-			m.errMsg = ""
-			m.scrollY = 0
-		}
+		m.viewport.GotoTop()
 	}
 	return nil
 }
@@ -346,7 +358,7 @@ func (m *chatModel) startStream() tea.Cmd {
 	m.scrollToBottom()
 
 	go m.client.StreamWithTools(ctx, apiMsgs, tools, ch)
-	return waitForChatMsg(ch)
+	return tea.Batch(waitForChatMsg(ch), m.thinkSpinner.Tick)
 }
 
 // filteredTools returns tools filtered by the current profile's toolset,
@@ -432,12 +444,10 @@ func (m *chatModel) logModelSwitch(from, to string) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 		defer cancel()
 		m.d.StoreObservation(ctx, m.sessionID, "model_switch", map[string]any{
-			"from":       from,
-			"to":         to,
-			"exchanges":  m.meter.exchanges,
-			"task":       m.scopedTask,
-			"plan":       m.scopedPlan,
-			"agent":      m.scopedAgent,
+			"from":      from,
+			"to":        to,
+			"exchanges": m.meter.exchanges,
+			"agent":     m.scopedAgent,
 		})
 	}()
 }
@@ -464,52 +474,17 @@ func (m *chatModel) storeReasoning(reasoning, response string) {
 	}()
 }
 
-func (m *chatModel) handleMouse(me tea.MouseEvent) tea.Cmd {
-	switch me.Button {
-	case tea.MouseButtonWheelUp:
-		m.scrollY--
-		if m.scrollY < 0 {
-			m.scrollY = 0
-		}
-	case tea.MouseButtonWheelDown:
-		m.scrollY++
-		if m.lines > 0 && m.scrollY > m.lines {
-			m.scrollY = m.lines
-		}
-	}
-	return nil
-}
-
-func (m *chatModel) scrollUp(n int) {
-	m.scrollY -= n
-	if m.scrollY < 0 {
-		m.scrollY = 0
-	}
-}
-
-func (m *chatModel) scrollDown(n int) {
-	m.scrollY += n
-	if m.lines > 0 && m.scrollY > m.lines {
-		m.scrollY = m.lines
-	}
-}
-
 func (m *chatModel) scrollToBottom() {
-	m.scrollY = 999999 // Will be clamped in View()
+	m.viewport.GotoBottom()
 }
 
 
-// cycleToolLimit cycles maxToolIter: 5 → 10 → 20 → 0(∞) → 5
+// cycleToolLimit toggles maxToolIter: 0(∞) ↔ 20 (safety cap)
 func (m *chatModel) cycleToolLimit() {
-	switch m.maxToolIter {
-	case 5:
-		m.maxToolIter = 10
-	case 10:
+	if m.maxToolIter == 0 {
 		m.maxToolIter = 20
-	case 20:
+	} else {
 		m.maxToolIter = 0
-	default:
-		m.maxToolIter = 5
 	}
 }
 

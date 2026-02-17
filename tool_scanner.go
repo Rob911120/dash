@@ -56,7 +56,11 @@ func AllToolDefs() map[string]func() *ToolDef {
 		"defSpawnAgent":       defSpawnAgent,
 		"defAgentStatus":      defAgentStatus,
 		"defUpdateAgentStatus": defUpdateAgentStatus,
+		// Cross-agent communication
+		"defAskAgent":    defAskAgent,
+		"defAnswerQuery": defAnswerQuery,
 		// Pipeline tools
+		"defGiveToPlanner": defGiveToPlanner,
 		"defWorkOrder":     defWorkOrder,
 		"defBuildGateTool": defBuildGateTool,
 		"defPipeline":      defPipeline,

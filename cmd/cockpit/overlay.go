@@ -8,6 +8,7 @@ import (
 
 	"dash"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
@@ -23,14 +24,26 @@ type overlayModel struct {
 	cursor   [3]int     // cursor per column
 	items    [3][]overlayItem
 	action   string     // set by Enter: "task:name", "plan:name", "refresh"
+
+	// Dashboard filter
+	filterInput textinput.Model
+	filtering   bool
+	filterText  string
 }
 
 func newOverlayModel() overlayModel {
-	return overlayModel{}
+	ti := textinput.New()
+	ti.Placeholder = "filter..."
+	ti.CharLimit = 50
+	ti.Prompt = "/ "
+	ti.PromptStyle = hudLabel
+	return overlayModel{filterInput: ti}
 }
 
-// rebuildItems updates selectable items for navigation.
+// rebuildItems updates selectable items for navigation, applying filter if set.
 func (o *overlayModel) rebuildItems(plans []*dash.PlanState, tasks []dash.TaskWithDeps) {
+	filter := strings.ToLower(o.filterText)
+
 	o.items[0] = nil
 	for _, p := range plans {
 		stage := string(p.Stage)
@@ -38,10 +51,14 @@ func (o *overlayModel) rebuildItems(plans []*dash.PlanState, tasks []dash.TaskWi
 		if p.Gate != nil {
 			gate = " " + p.Gate.Decision
 		}
+		label := fmt.Sprintf("%s [%s]%s", p.Node.Name, stage, gate)
+		if filter != "" && !strings.Contains(strings.ToLower(label), filter) {
+			continue
+		}
 		o.items[0] = append(o.items[0], overlayItem{
 			kind:  "plan",
 			name:  p.Node.Name,
-			label: fmt.Sprintf("%s [%s]%s", p.Node.Name, stage, gate),
+			label: label,
 		})
 	}
 	for _, t := range tasks {
@@ -49,10 +66,14 @@ func (o *overlayModel) rebuildItems(plans []*dash.PlanState, tasks []dash.TaskWi
 		if t.IsBlocked {
 			status = "blocked"
 		}
+		label := fmt.Sprintf("%s [%s]", t.Node.Name, status)
+		if filter != "" && !strings.Contains(strings.ToLower(label), filter) {
+			continue
+		}
 		o.items[0] = append(o.items[0], overlayItem{
 			kind:  "task",
 			name:  t.Node.Name,
-			label: fmt.Sprintf("%s [%s]", t.Node.Name, status),
+			label: label,
 		})
 	}
 	// Clamp cursors
@@ -67,6 +88,28 @@ func (o *overlayModel) rebuildItems(plans []*dash.PlanState, tasks []dash.TaskWi
 }
 
 func (o *overlayModel) handleKey(msg tea.KeyMsg) tea.Cmd {
+	// Filter mode: delegate to textinput
+	if o.filtering {
+		switch msg.Type {
+		case tea.KeyEsc:
+			o.filtering = false
+			o.filterText = ""
+			o.filterInput.Reset()
+			o.filterInput.Blur()
+			return nil
+		case tea.KeyEnter:
+			o.filtering = false
+			o.filterText = o.filterInput.Value()
+			o.filterInput.Blur()
+			return nil
+		default:
+			var cmd tea.Cmd
+			o.filterInput, cmd = o.filterInput.Update(msg)
+			o.filterText = o.filterInput.Value()
+			return cmd
+		}
+	}
+
 	action := resolveDashKey(msg)
 	switch action {
 	case ActionDashColLeft:
@@ -128,12 +171,17 @@ func (o *overlayModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case ActionDashClearContinue:
 		o.action = "clear-continue"
 		return nil
+	case ActionDashFilter:
+		o.filtering = true
+		o.filterInput.Reset()
+		o.filterInput.Focus()
+		return o.filterInput.Cursor.BlinkCmd()
 	}
 	return nil
 }
 
 // View renders the 3-column dashboard overlay with a status bar.
-func (o *overlayModel) View(width, height int, tasks []dash.TaskWithDeps, proposals []dash.Proposal, plans []*dash.PlanState, sessions []dash.ActivitySummary, services []serviceStatus, ws *dash.WorkingSet, tree *dash.HierarchyTree, client *chatClient, agents *agentManager, spawnInput bool, spawnBuf []rune, maxToolIter int, snapshot *dash.AgentContextSnapshot, workOrders []*dash.WorkOrder) string {
+func (o *overlayModel) View(width, height int, tasks []dash.TaskWithDeps, proposals []dash.Proposal, plans []*dash.PlanState, sessions []dash.ActivitySummary, services []serviceStatus, ws *dash.WorkingSet, tree *dash.HierarchyTree, client *chatClient, agents *agentManager, spawnInput bool, spawnBuf []rune, maxToolIter int, snapshot *dash.AgentContextSnapshot, workOrders []*dash.WorkOrder, meterView string) string {
 	if width < 40 {
 		width = 80
 	}
@@ -141,6 +189,21 @@ func (o *overlayModel) View(width, height int, tasks []dash.TaskWithDeps, propos
 	// Status bar at top
 	bar := o.renderStatusBar(width, client, agents, spawnInput, spawnBuf, maxToolIter)
 	barLines := strings.Count(bar, "\n") + 1
+
+	// Filter line
+	filterLine := ""
+	if o.filtering {
+		matches := len(o.items[0])
+		filterLine = o.filterInput.View() + textDim.Render(fmt.Sprintf(" (%d matches)", matches))
+		barLines++
+		bar += "\n" + filterLine
+	} else if o.filterText != "" {
+		matches := len(o.items[0])
+		filterLine = textDim.Render("/ "+o.filterText) + textDim.Render(fmt.Sprintf(" (%d matches)  [/] edit  [esc] clear", matches))
+		barLines++
+		bar += "\n" + filterLine
+	}
+
 	colHeight := height - barLines - 1
 
 	// Responsive layout
@@ -162,7 +225,7 @@ func (o *overlayModel) View(width, height int, tasks []dash.TaskWithDeps, propos
 	} else {
 		col1 = o.renderWorkColumn(width/cols-4, colHeight, plans, tasks, workOrders)
 		col2 = o.renderIntelColumn(width/cols-4, colHeight, proposals, ws)
-		col3 = o.renderSystemColumn(width/cols-4, colHeight, services, sessions, ws)
+		col3 = o.renderSystemColumn(width/cols-4, colHeight, services, sessions, ws, meterView)
 	}
 
 	// Apply panel styles
@@ -394,12 +457,20 @@ func (o *overlayModel) renderIntelColumn(w, h int, proposals []dash.Proposal, ws
 	return b.String()
 }
 
-func (o *overlayModel) renderSystemColumn(w, h int, services []serviceStatus, sessions []dash.ActivitySummary, ws *dash.WorkingSet) string {
+func (o *overlayModel) renderSystemColumn(w, h int, services []serviceStatus, sessions []dash.ActivitySummary, ws *dash.WorkingSet, meterView string) string {
 	var b strings.Builder
 	b.WriteString(sectionHeader.Render("SYSTEM"))
 	b.WriteString("\n")
 	b.WriteString(sectionDivider.Render(strings.Repeat("\u2500", min(w, 30))))
 	b.WriteString("\n")
+
+	// Token meter
+	if meterView != "" {
+		b.WriteString(textPrimary.Render("CONTEXT"))
+		b.WriteString("\n")
+		b.WriteString("  " + meterView)
+		b.WriteString("\n\n")
+	}
 
 	// Services
 	b.WriteString(textPrimary.Render("SERVICES"))
@@ -480,21 +551,6 @@ func (o *overlayModel) renderStatusBar(w int, client *chatClient, agents *agentM
 	b.WriteString(" ")
 	b.WriteString(textPrimary.Render("▸ " + shortModel))
 	b.WriteString(textDim.Render(" [å/ä]"))
-
-	// Agents section
-	b.WriteString("    ")
-	b.WriteString(sectionHeader.Render("AGENTS"))
-	if agents != nil && agents.count() > 0 {
-		for i, tab := range agents.tabs {
-			icon := "  "
-			if i == agents.activeIdx {
-				icon = " ●"
-			}
-			b.WriteString(textDim.Render(icon) + " " + textPrimary.Render(tab.displayName))
-		}
-		b.WriteString(textDim.Render(" [p/ö]"))
-	}
-	b.WriteString(textDim.Render(" [n]new"))
 
 	// Tools section
 	b.WriteString("    ")

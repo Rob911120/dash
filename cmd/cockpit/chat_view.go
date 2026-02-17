@@ -5,23 +5,8 @@ import (
 	"strings"
 )
 
-func (m *chatModel) View(width, height int) string {
-	if m.client == nil || m.client.router == nil {
-		return textDim.Render("  No LLM provider configured")
-	}
-
-	var out strings.Builder
-
-	// Scope header
-	if m.scopedPlan != "" {
-		out.WriteString(scopeStyle.Render("  EXECUTING: "+m.scopedPlan) + "\n")
-		height--
-	} else if m.scopedTask != "" {
-		out.WriteString(scopeStyle.Render("  TASK: "+m.scopedTask) + "\n")
-		height--
-	}
-
-	// Build message content
+// renderMessages builds the scrollable chat content string.
+func (m *chatModel) renderMessages(width int) string {
 	contentWidth := width - 4
 	if contentWidth < 20 {
 		contentWidth = 20
@@ -40,35 +25,57 @@ func (m *chatModel) View(width, height int) string {
 		boxWidth = 24
 	}
 
+	// Find index of the last assistant message (for collapsible tool logic)
+	lastAssistantIdx := -1
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if m.messages[i].Role == "assistant" {
+			lastAssistantIdx = i
+			break
+		}
+	}
+
 	var content strings.Builder
-	for _, msg := range m.messages {
+	for i, msg := range m.messages {
 		switch msg.Role {
 		case "system-marker":
 			content.WriteString(textDim.Render("  \u2500\u2500 "+msg.Content+" \u2500\u2500") + "\n")
+		case "control-briefing":
+			box := controlBriefingBox.Width(boxWidth).Render(msg.Content)
+			for _, line := range strings.Split(box, "\n") {
+				content.WriteString("  " + line + "\n")
+			}
+		case "control-release":
+			content.WriteString(textCyan.Render("  ── "+msg.Content+" ──") + "\n")
 		case "user":
 			content.WriteString(chatUser.Render("  > "))
 			content.WriteString(chatUser.Render(wrapText(msg.Content, contentWidth)))
 			content.WriteString("\n")
 		case "assistant":
 			if m.showReasoning && msg.Reasoning != "" {
-				content.WriteString(reasoningLabel.Render("  [thinking]") + "\n")
-				for _, line := range strings.Split(wrapText(msg.Reasoning, contentWidth-2), "\n") {
-					content.WriteString(reasoningText.Render("  "+line) + "\n")
-				}
-				content.WriteString(reasoningLabel.Render("  [/thinking]") + "\n")
+				wrapped := wrapText(msg.Reasoning, contentWidth-4)
+				content.WriteString("  " + reasoningBlock.Render(wrapped) + "\n")
 			}
 			if msg.Content != "" {
 				content.WriteString("  ")
 				content.WriteString(wrapText(msg.Content, contentWidth))
 				content.WriteString("\n")
 			}
+
+			// Collapse completed tool calls for older messages when toolsCollapsed is true
+			isLastAssistant := i == lastAssistantIdx
 			for _, tc := range msg.ToolCalls {
 				if result, ok := toolResults[tc.ID]; ok {
-					box := renderToolBox(tc, result, boxWidth)
-					for _, line := range strings.Split(box, "\n") {
-						content.WriteString("  " + line + "\n")
+					if m.toolsCollapsed && !isLastAssistant {
+						// Collapsed: one-line badge
+						content.WriteString("  " + renderToolBadge(tc, result, boxWidth) + "\n")
+					} else {
+						box := renderToolBox(tc, result, boxWidth)
+						for _, line := range strings.Split(box, "\n") {
+							content.WriteString("  " + line + "\n")
+						}
 					}
 				} else {
+					// Pending: always expanded
 					box := renderToolBoxPending(tc, boxWidth)
 					for _, line := range strings.Split(box, "\n") {
 						content.WriteString("  " + line + "\n")
@@ -82,13 +89,11 @@ func (m *chatModel) View(width, height int) string {
 	if m.streaming {
 		if m.reasoningBuf != "" {
 			if m.showReasoning {
-				content.WriteString(reasoningLabel.Render("  [thinking]") + "\n")
-				for _, line := range strings.Split(wrapText(m.reasoningBuf, contentWidth-2), "\n") {
-					content.WriteString(reasoningText.Render("  "+line) + "\n")
-				}
+				wrapped := wrapText(m.reasoningBuf, contentWidth-4)
+				content.WriteString("  " + reasoningBlock.Render(wrapped) + "\n")
 			} else if m.streamBuf == "" {
 				lines := strings.Count(m.reasoningBuf, "\n") + 1
-				content.WriteString(textDim.Render(fmt.Sprintf("  thinking... (%d lines, ctrl+o to show)", lines)) + "\n")
+				content.WriteString("  " + m.thinkSpinner.View() + textDim.Render(fmt.Sprintf(" thinking (%d lines)", lines)) + "\n")
 			}
 		}
 		content.WriteString("  ")
@@ -106,62 +111,49 @@ func (m *chatModel) View(width, height int) string {
 		content.WriteString(textAlert.Render("  Error: "+m.errMsg) + "\n")
 	}
 
-	// Viewport scrolling
-	allLines := strings.Split(content.String(), "\n")
-	m.lines = len(allLines)
+	return content.String()
+}
 
-	viewHeight := height - 5 // header + divider + input + footer + margin
-	if viewHeight < 1 {
-		viewHeight = 1
-	}
-
-	// Clamp scroll position
-	maxScroll := len(allLines) - viewHeight
-	if maxScroll < 0 {
-		maxScroll = 0
+func (m *chatModel) View(width, height int) string {
+	if m.client == nil || m.client.router == nil {
+		return textDim.Render("  No LLM provider configured")
 	}
 
-	// Auto-follow: if user was at bottom last render, stay at bottom
-	if m.scrollY >= m.lastMaxScroll {
-		m.scrollY = maxScroll
-	}
-	m.lastMaxScroll = maxScroll
+	var out strings.Builder
 
-	if m.scrollY > maxScroll {
-		m.scrollY = maxScroll
+	// Resize viewport for this frame
+	vpH := height - 1 // -1 for input line
+	if vpH < 1 {
+		vpH = 1
 	}
-	if m.scrollY < 0 {
-		m.scrollY = 0
+	m.viewport.Width = width
+	m.viewport.Height = vpH
+
+	// Build and set content
+	content := m.renderMessages(width)
+	wasAtBottom := m.viewport.AtBottom()
+	m.viewport.SetContent(content)
+	if wasAtBottom || m.streaming {
+		m.viewport.GotoBottom()
 	}
 
-	start := m.scrollY
-	end := start + viewHeight
-	if end > len(allLines) {
-		end = len(allLines)
-	}
-	visible := allLines[start:end]
-
-	// Scroll indicators
-	if m.scrollY > 0 {
-		out.WriteString(textDim.Render("  ↑ more ↑") + "\n")
-	}
-	// Top-aligned rendering - consistent scroll experience
-	out.WriteString(strings.Join(visible, "\n"))
-
-	if m.scrollY < maxScroll {
-		out.WriteString("\n" + textDim.Render("  ↓ more ↓"))
-	}
+	// Render viewport
+	out.WriteString(m.viewport.View())
 
 	// Input line
-	prompt := chatInput.Render("  > ")
+	out.WriteString("\n")
+	var prompt string
 	promptLen := 4
-	if m.runMode {
-		if m.streaming {
-			out.WriteString(textDim.Render("  executing..."))
-		} else {
-			out.WriteString(textDim.Render("  esc: back  enter: continue"))
-		}
-	} else if m.streaming {
+	if m.scopedAgent == "orchestrator" {
+		prompt = chatInput.Render("  [CMD] > ")
+		promptLen = 10
+	} else if m.scopedAgent != "" {
+		prompt = chatInput.Render("  [" + m.scopedAgent + "] > ")
+		promptLen = len(m.scopedAgent) + 6
+	} else {
+		prompt = chatInput.Render("  > ")
+	}
+	if m.streaming {
 		out.WriteString(prompt + textDim.Render("streaming..."))
 	} else {
 		inputStr := string(m.input)
@@ -206,10 +198,17 @@ func (m *chatModel) View(width, height int) string {
 }
 
 func (m *chatModel) FooterHelp() string {
-	reasoningHint := "ctrl+o: thinking"
-	if m.showReasoning {
-		reasoningHint = "ctrl+o: hide thinking"
+	// Mode-specific help bindings
+	var helpStr string
+	if m.streaming {
+		m.helpModel.ShowAll = false
+		helpStr = m.helpModel.ShortHelpView(m.keyMap.StreamingHelp())
+	} else {
+		m.helpModel.ShowAll = false
+		helpStr = m.helpModel.ShortHelpView(m.keyMap.ShortHelp())
 	}
+
+	// Model info suffix
 	shortModel := m.client.model
 	if idx := strings.LastIndex(shortModel, "/"); idx >= 0 {
 		shortModel = shortModel[idx+1:]
@@ -221,10 +220,6 @@ func (m *chatModel) FooterHelp() string {
 	modelInfo := modelStyle.Render(shortModel) + " " + textDim.Render(toolLimitStr)
 	if m.scopedAgent != "" {
 		modelInfo = textDim.Render("["+m.scopedAgent+"]") + " " + modelInfo
-	} else if m.scopedPlan != "" {
-		modelInfo = textDim.Render("["+m.scopedPlan+"]") + " " + modelInfo
-	} else if m.scopedTask != "" {
-		modelInfo = textDim.Render("["+m.scopedTask+"]") + " " + modelInfo
 	}
 
 	meterStr := ""
@@ -232,11 +227,5 @@ func (m *chatModel) FooterHelp() string {
 		meterStr = "  " + mv
 	}
 
-	if m.runMode {
-		return "esc: back  " + reasoningHint + "  " + modelInfo + meterStr
-	}
-	if m.streaming {
-		return "esc: stop  " + reasoningHint + "  " + modelInfo + meterStr
-	}
-	return "enter: send  ctrl+l: clear  tab+å/ä: model  " + reasoningHint + "  pgup/dn  " + modelInfo + meterStr
+	return helpStr + "  " + modelInfo + meterStr
 }

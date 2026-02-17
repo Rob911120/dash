@@ -45,12 +45,12 @@ var (
 
 	// Panel styles
 	panelNormal = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
+			Border(lipgloss.RoundedBorder()).
 			BorderForeground(cGray).
 			Padding(0, 1)
 
 	panelFocused = lipgloss.NewStyle().
-			Border(lipgloss.NormalBorder()).
+			Border(lipgloss.RoundedBorder()).
 			BorderForeground(cPrimary).
 			Padding(0, 1)
 
@@ -93,6 +93,12 @@ var (
 	// Reasoning
 	reasoningText  = lipgloss.NewStyle().Foreground(cGray).Italic(true)
 	reasoningLabel = lipgloss.NewStyle().Foreground(cDim).Bold(true)
+	reasoningBlock = lipgloss.NewStyle().
+			Border(lipgloss.Border{Left: "\u2502"}, false, false, false, true).
+			BorderForeground(cDim).
+			Foreground(cGray).
+			Italic(true).
+			PaddingLeft(1)
 
 	// Footer
 	footerStyle = lipgloss.NewStyle().Foreground(cGray)
@@ -103,9 +109,6 @@ var (
 	// Alignment bar (proposals)
 	barFilled = lipgloss.NewStyle().Foreground(cSuccess)
 	barEmpty  = lipgloss.NewStyle().Foreground(cDim)
-
-	// Scope indicator
-	scopeStyle = lipgloss.NewStyle().Foreground(cPrimary).Bold(true)
 
 	// Model name
 	modelStyle = lipgloss.NewStyle().Foreground(cMagenta)
@@ -131,4 +134,23 @@ var (
 			Foreground(cAlert).
 			Background(lipgloss.Color("#2A2B3D")).
 			Padding(0, 1)
+
+	// Controller-aware tab styles
+	tabHumanFocused = lipgloss.NewStyle().
+			Foreground(cText).Background(cSuccess).Bold(true).Padding(0, 1)
+	tabHumanUnfocused = lipgloss.NewStyle().
+				Foreground(cSuccess).Background(lipgloss.Color("#2A2B3D")).Padding(0, 1)
+	tabLLMFocused = lipgloss.NewStyle().
+			Foreground(cText).Background(cMagenta).Bold(true).Padding(0, 1)
+	tabLLMUnfocused = lipgloss.NewStyle().
+			Foreground(cMagenta).Background(lipgloss.Color("#2A2B3D")).Padding(0, 1)
+	tabIdleFocused = lipgloss.NewStyle().
+			Foreground(cText).Background(cPrimary).Bold(true).Padding(0, 1)
+
+	// Control briefing HUD box
+	controlBriefingBox = lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(cCyan).
+				Foreground(cText).
+				Padding(0, 1)
 )

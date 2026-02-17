@@ -320,14 +320,8 @@ func (m *chatModel) systemPrompt() string {
 		profileName = "agent-continuous"
 		opts.AgentKey = m.scopedAgent
 		opts.AgentMission = m.agentMission
-	case m.scopedPlan != "":
-		profileName = "execution"
-		opts.PlanName = m.scopedPlan
-	case m.scopedTask != "":
-		profileName = "task"
-		opts.TaskName = m.scopedTask
 	default:
-		profileName = "compact"
+		profileName = "orchestrator" // fallback
 	}
 
 	opts.ContextPressurePct = m.meter.pct()
@@ -336,6 +330,12 @@ func (m *chatModel) systemPrompt() string {
 	if err != nil {
 		return "Du är en AI-agent med åtkomst till en grafdatabas. Svara på svenska."
 	}
+
+	// Cross-agent query injection
+	if m.answeringQueryInfo != nil {
+		text += fmt.Sprintf("\n\nDu svarar just nu på en fråga (query_id: %s) från %s.\nNär du har ett svar, AVSLUTA med: answer_query(query_id=\"%s\", answer=\"ditt svar här\")\n", m.answeringQueryInfo.id, m.answeringQueryInfo.callerKey, m.answeringQueryInfo.id)
+	}
+
 	return text
 }
 
@@ -343,13 +343,6 @@ func (m *chatModel) systemPrompt() string {
 func (m *chatModel) continuationPrompt() string {
 	var b strings.Builder
 	b.WriteString("== DASH ==\n")
-
-	if m.scopedPlan != "" {
-		b.WriteString(fmt.Sprintf("PLAN: %s\n", m.scopedPlan))
-	} else if m.scopedTask != "" {
-		b.WriteString(fmt.Sprintf("TASK: %s\n", m.scopedTask))
-	}
-
 	b.WriteString("VERKTYG: working_set, query, remember, node, tasks\n")
 
 	// Active work order nudge for agents
@@ -364,6 +357,11 @@ func (m *chatModel) continuationPrompt() string {
 		}
 	}
 
+	// Planner-specific nudge
+	if m.scopedAgent == "planner-agent" {
+		b.WriteString("PLAN-REQUESTS: kolla plan(op=\"list\") för aktiva planer\n")
+	}
+
 	// File nudge: most recent + most frequent
 	if m.lastFile != "" {
 		b.WriteString(fmt.Sprintf("SENASTE FIL: %s\n", m.lastFile))
@@ -374,6 +372,12 @@ func (m *chatModel) continuationPrompt() string {
 
 	if pct := m.meter.pct(); pct >= 70 {
 		b.WriteString(fmt.Sprintf("CONTEXT: %d%% — sammanfatta snart.\n", pct))
+	}
+
+	// Cross-agent query injection
+	if m.answeringQueryInfo != nil {
+		b.WriteString(fmt.Sprintf("\nDu svarar just nu på en fråga (query_id: %s) från %s.\n", m.answeringQueryInfo.id, m.answeringQueryInfo.callerKey))
+		b.WriteString(fmt.Sprintf("När du har ett svar, AVSLUTA med: answer_query(query_id=\"%s\", answer=\"ditt svar här\")\n", m.answeringQueryInfo.id))
 	}
 
 	return b.String()

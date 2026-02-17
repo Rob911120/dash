@@ -10,21 +10,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// AvailableAgents - agents that can be spawned via 1-7 keys
-var AvailableAgents = []struct {
-	Key         string
-	DisplayName string
-	Description string
-}{
-	{Key: "orchestrator", DisplayName: "🎯 Orchestrator", Description: "Pipeline manager"},
-	{Key: "cockpit-backend", DisplayName: "🖥️ Backend", Description: "Go/PostgreSQL"},
-	{Key: "cockpit-frontend", DisplayName: "🎨 Frontend", Description: "TypeScript/React"},
-	{Key: "systemprompt-agent", DisplayName: "📝 Prompts", Description: "Prompt engineering"},
-	{Key: "database-agent", DisplayName: "🗄️ DB", Description: "Database ops"},
-	{Key: "system-agent", DisplayName: "⚙️ System", Description: "Architecture"},
-	{Key: "shift-agent", DisplayName: "🔄 Shift", Description: "Handoff"},
-}
-
 type agentStatus int
 
 const (
@@ -77,6 +62,7 @@ type agentTab struct {
 	displayName     string
 	agentKey        string
 	status          agentStatus
+	controller      string // "human", "llm", "idle"
 	chat            *chatModel
 	mission         string
 	sessionID       string
@@ -85,6 +71,7 @@ type agentTab struct {
 	meter           tokenMeter
 	pendingMessage  string // saved input while waiting for lazy spawn
 	activeWorkOrder *activeWO // current work order assigned to this agent
+	answeringQuery  *pendingQuery // non-nil when answering a cross-agent query
 }
 
 // activeWO holds the essential fields of an active work order for display.
@@ -185,7 +172,46 @@ func (am *agentManager) removeTab(id string) {
 	}
 }
 
-// tabBar renders the agent tab bar.
+// controllerIcon returns a presence icon based on controller state and focus.
+func controllerIcon(controller string, isFocused, isStreaming bool) string {
+	switch controller {
+	case "human":
+		return "👤"
+	case "llm":
+		if isStreaming {
+			return "🤖⠋"
+		}
+		return "🤖"
+	default: // "idle" or ""
+		if isFocused {
+			return "👁"
+		}
+		return "○"
+	}
+}
+
+// controllerStyle returns the appropriate lipgloss style for a tab.
+func controllerStyle(controller string, isFocused bool) lipgloss.Style {
+	switch controller {
+	case "human":
+		if isFocused {
+			return tabHumanFocused
+		}
+		return tabHumanUnfocused
+	case "llm":
+		if isFocused {
+			return tabLLMFocused
+		}
+		return tabLLMUnfocused
+	default: // "idle"
+		if isFocused {
+			return tabIdleFocused
+		}
+		return tabAgentInactive
+	}
+}
+
+// tabBar renders the agent tab bar with presence and focus indicators.
 func (am *agentManager) tabBar(width int) string {
 	if len(am.tabs) == 0 {
 		return ""
@@ -193,19 +219,34 @@ func (am *agentManager) tabBar(width int) string {
 
 	var parts []string
 	for i, t := range am.tabs {
-		icon := t.status.Icon()
+		isFocused := i == am.activeIdx
+		icon := controllerIcon(t.controller, isFocused, t.chat != nil && t.chat.streaming)
+		style := controllerStyle(t.controller, isFocused)
 
-		// Compact label: "1○BE" for inactive, "1▶Backend [active]" for active
-		shortName := t.agentKey
-		// Extract short key from agent key (e.g. "cockpit-backend" → "back")
-		if idx := strings.LastIndex(shortName, "-"); idx >= 0 && idx+1 < len(shortName) {
-			shortName = shortName[idx+1:]
-		}
-		if len(shortName) > 5 {
-			shortName = shortName[:5]
+		// Name: full for focused, short for unfocused
+		name := t.displayName
+		if !isFocused {
+			// Extract short key from agent key (e.g. "cockpit-backend" → "back")
+			name = t.agentKey
+			if idx := strings.LastIndex(name, "-"); idx >= 0 && idx+1 < len(name) {
+				name = name[idx+1:]
+			}
+			if len(name) > 5 {
+				name = name[:5]
+			}
 		}
 
-		// WO suffix: show active work order name in tab
+		// Query indicator
+		querySuffix := ""
+		if t.answeringQuery != nil {
+			caller := t.answeringQuery.callerKey
+			if len(caller) > 6 {
+				caller = caller[:6]
+			}
+			querySuffix = fmt.Sprintf(" ?←%s", caller)
+		}
+
+		// WO suffix for focused or active tabs
 		woSuffix := ""
 		if t.activeWorkOrder != nil {
 			woIcon := woStatusIconStr(t.activeWorkOrder.Status)
@@ -216,17 +257,14 @@ func (am *agentManager) tabBar(width int) string {
 			woSuffix = fmt.Sprintf(" %s%s", woIcon, woName)
 		}
 
-		if i == am.activeIdx {
-			label := fmt.Sprintf(" %d%s %s%s ", i+1, icon, t.displayName, woSuffix)
-			parts = append(parts, tabAgentActive.Render(label))
-		} else if t.status != agentIdle || t.activeWorkOrder != nil {
-			// Spawned agents or agents with WO keep full name
-			label := fmt.Sprintf(" %d%s %s%s ", i+1, icon, t.displayName, woSuffix)
-			parts = append(parts, tabAgentInactive.Render(label))
-		} else {
-			label := fmt.Sprintf(" %d%s %s ", i+1, icon, shortName)
-			parts = append(parts, tabAgentInactive.Render(label))
+		// Show full name for active agents even when not focused
+		if !isFocused && (t.status != agentIdle || t.activeWorkOrder != nil || t.controller == "human" || t.controller == "llm") {
+			name = t.displayName
 		}
+
+		label := fmt.Sprintf(" %s %s%s%s ", icon, name, querySuffix, woSuffix)
+		_ = i
+		parts = append(parts, style.Render(label))
 	}
 
 	return strings.Join(parts, "")
@@ -279,55 +317,6 @@ func (am *agentManager) updateWorkOrders(workOrders []*dash.WorkOrder) {
 			}
 		}
 	}
-}
-
-// AgentPicker returns a styled overlay showing available agents.
-// This is shown when user presses Shift+Tab.
-func AgentPicker(width int) string {
-	// Create a nice box with the agent options
-	var lines []string
-	
-	// Title
-	titleStyle := lipgloss.NewStyle().
-		Foreground(cCyan).
-		Bold(true)
-	lines = append(lines, titleStyle.Render("  ▶ SPAWN AGENT"))
-	lines = append(lines, "")
-	
-	// Agent options
-	for i, a := range AvailableAgents {
-		numStyle := lipgloss.NewStyle().
-			Foreground(cPrimary).
-			Bold(true)
-		nameStyle := lipgloss.NewStyle().
-			Foreground(cText)
-		descStyle := lipgloss.NewStyle().
-			Foreground(cGray)
-		
-		num := numStyle.Render(fmt.Sprintf("  [%d]", i+1))
-		name := nameStyle.Render(fmt.Sprintf(" %s ", a.DisplayName))
-		desc := descStyle.Render(a.Description)
-		
-		lines = append(lines, num+name+desc)
-	}
-	
-	// Help text at bottom
-	lines = append(lines, "")
-	helpStyle := lipgloss.NewStyle().
-		Foreground(cGray).
-		Italic(true)
-	lines = append(lines, helpStyle.Render("  Press 1-7 to spawn · esc to close"))
-	
-	// Join with newlines and wrap in a bordered box
-	content := strings.Join(lines, "\n")
-	
-	boxStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(cPrimary).
-		Padding(0, 2).
-		Width(min(width-4, 50))
-	
-	return boxStyle.Render(content)
 }
 
 func min(a, b int) int {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"dash"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 )
 
@@ -17,7 +19,6 @@ const (
 	viewChat viewState = iota
 	viewDashboard
 	viewAgent
-	viewAgentPicker // New: shows agent selection menu
 )
 
 type model struct {
@@ -56,29 +57,51 @@ type model struct {
 	preDashState      viewState
 	activeStreamOwner string                     // agentKey that owns current stream, "" = main
 	agentSnapshot     *dash.AgentContextSnapshot // nil = global dashboard
+
+	// Cross-agent queries
+	pendingQueries map[string]*pendingQuery // queryID → pending query
+
+	// All agent definitions loaded from DB (including non-favorites)
+	allAgentDefs []dash.AgentDef
 }
 
 func newModel(d *dash.Dash, chatCl *chatClient, sessionID string, db *sql.DB) model {
+	// Load agent definitions from DB
+	defs := dash.LoadAgentDefs(context.Background(), d)
+
 	m := model{
-		state:         viewChat,
-		d:             d,
-		chatCl:        chatCl,
-		hud:           newHudModel(),
-		chat:          newChatModel(chatCl, d, sessionID),
-		overlay:       newOverlayModel(),
-		agents:        newAgentManager(),
-		agent:         newObservationAgent(db),
-		notifications: make([]observationNotification, 0),
+		state:          viewChat,
+		d:              d,
+		chatCl:         chatCl,
+		hud:            newHudModel(),
+		chat:           newChatModel(chatCl, d, sessionID),
+		overlay:        newOverlayModel(),
+		agents:         newAgentManager(),
+		agent:          newObservationAgent(db),
+		notifications:  make([]observationNotification, 0),
+		pendingQueries: make(map[string]*pendingQuery),
+		allAgentDefs:   defs,
 	}
 
-	// Pre-create all agent tabs as idle (lazy spawn on first message)
-	for _, a := range AvailableAgents {
-		agentChat := newChatModel(chatCl, d, "")
-		agentChat.scopedAgent = a.Key
-		if mission, ok := agentMissions[a.Key]; ok {
-			agentChat.agentMission = mission
+	// Main chat = orchestrator — find mission from DB defs
+	m.chat.scopedAgent = "orchestrator"
+	for _, def := range defs {
+		if def.Key == "orchestrator" {
+			m.chat.agentMission = def.Mission
+			break
 		}
-		m.agents.spawn(a.DisplayName, a.Key, "", "", "", agentChat)
+	}
+
+	// Pre-create favorite agent tabs as idle (lazy spawn on first message)
+	for _, def := range defs {
+		if !def.Favorite {
+			continue
+		}
+		agentChat := newChatModel(chatCl, d, "")
+		agentChat.scopedAgent = def.Key
+		agentChat.agentMission = def.Mission
+		tab := m.agents.spawn(def.DisplayName, def.Key, "", "", "", agentChat)
+		tab.controller = "idle"
 	}
 
 	return m
@@ -91,6 +114,7 @@ func (m model) Init() tea.Cmd {
 		fetchIntel(m.d),
 		tickCmd(),
 		observationTickCmd(),
+		takeControlCmd(m.d, "orchestrator", m.chat.sessionID, m.chat.agentMission),
 	)
 }
 
@@ -107,7 +131,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch globalAction {
 		case ActionQuit:
 			m.quitting = true
-			return m, tea.Quit
+			cmds := m.releaseAllAgents()
+			cmds = append(cmds, tea.Quit)
+			return m, tea.Batch(cmds...)
 		case ActionToggleDash:
 			return m.toggleDashboard()
 		case ActionCycleAgentNext:
@@ -118,21 +144,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.state == viewAgent {
 			action := resolveAgentViewKey(msg)
 			switch action {
-			case ActionAgentQuickSwitch:
-				return m.handleAgentQuickSwitch(msg.String())
 			case ActionAgentBack:
+				var cmds []tea.Cmd
+				if tab := m.agents.active(); tab != nil && tab.controller == "human" {
+					tab.controller = "idle"
+					cmds = append(cmds, releaseControlCmd(m.d, tab, "back"))
+				}
 				m.agents.deactivate()
 				m.state = viewChat
-				return m, nil
+				return m, tea.Batch(cmds...)
+			case ActionPauseAgent:
+				if tab := m.agents.active(); tab != nil {
+					prevController := tab.controller
+					tab.controller = "idle"
+					return m, pauseAgentCmd(m.d, tab, prevController)
+				}
 			}
 		}
-		if m.state == viewAgentPicker {
-			if msg.String() == "esc" {
-				m.state = viewChat
-				return m, nil
-			}
-		}
-
 		// Route keys to active view
 		switch m.state {
 		case viewChat:
@@ -140,6 +168,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, cmd
 		case viewAgent:
 			if tab := m.agents.active(); tab != nil {
+				// Auto take-control on first input character
+				if tab.controller != "human" && isInputChar(msg) {
+					tab.controller = "human"
+					takeCmd := takeControlCmd(m.d, tab.agentKey, tab.sessionID, tab.mission)
+					chatCmd := tab.chat.Update(msg, m.width, m.contentHeight())
+					return m, tea.Batch(takeCmd, chatCmd)
+				}
 				// Lazy spawn: intercept Enter on idle agent
 				if tab.status == agentIdle {
 					if msg.Type == tea.KeyEnter {
@@ -164,6 +199,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m.handleSpawnInput(msg)
 			}
 			cmd := m.overlay.handleKey(msg)
+			// Rebuild items after filter changes
+			if m.overlay.filtering || m.overlay.filterText != "" {
+				m.overlay.rebuildItems(m.plans, m.tasks)
+			}
 			if cmd != nil {
 				return m, cmd
 			}
@@ -260,11 +299,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			// Check if this was a lazy spawn failure
 			for _, tab := range m.agents.tabs {
-				if tab.status == agentSpawned && tab.pendingMessage != "" {
+				if tab.status == agentSpawned && (tab.pendingMessage != "" || tab.answeringQuery != nil) {
 					tab.status = agentIdle
 					tab.chat.toolStatus = ""
 					tab.chat.errMsg = fmt.Sprintf("Spawn failed: %v", msg.err)
 					tab.pendingMessage = ""
+					// Clean up any pending query
+					if tab.answeringQuery != nil {
+						delete(m.pendingQueries, tab.answeringQuery.id)
+						tab.answeringQuery = nil
+					}
 					return m, nil
 				}
 			}
@@ -281,6 +325,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					tab.status = agentActive
 					tab.spawnedAt = time.Now()
 					tab.mission = msg.info.Mission
+
+					// Cross-agent query spawn: question already injected, start stream
+					if tab.answeringQuery != nil {
+						m.activeStreamOwner = tab.agentKey
+						return m, tab.chat.startStream()
+					}
 
 					if tab.pendingMessage != "" {
 						tab.chat.messages = append(tab.chat.messages, chatMessage{
@@ -344,10 +394,73 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+
+	case takeControlMsg:
+		if msg.err != nil {
+			// Rollback optimistic controller update
+			for _, tab := range m.agents.tabs {
+				if tab.agentKey == msg.agentKey && tab.controller == "human" {
+					tab.controller = "idle"
+				}
+			}
+			return m, nil
+		}
+		// Inject briefing into the right chat
+		if msg.agentKey == "orchestrator" {
+			m.chat.addSystemMessage(msg.briefing)
+		} else {
+			for _, tab := range m.agents.tabs {
+				if tab.agentKey == msg.agentKey {
+					tab.chat.messages = append(tab.chat.messages, chatMessage{
+						Role: "control-briefing", Content: msg.briefing,
+					})
+					tab.chat.scrollToBottom()
+					break
+				}
+			}
+		}
+		return m, nil
+
+	case releaseControlMsg:
+		if msg.err == nil {
+			// Inject release marker into orchestrator chat
+			m.chat.addSystemMessage("── Återfick kontroll från " + msg.agentKey + " ──")
+		}
+		return m, nil
+
+	case pauseAgentMsg:
+		if msg.err == nil {
+			for _, tab := range m.agents.tabs {
+				if tab.agentKey == msg.agentKey {
+					tab.chat.messages = append(tab.chat.messages, chatMessage{
+						Role: "control-release", Content: "⏸ Agent pausad",
+					})
+					tab.chat.scrollToBottom()
+					// Stop any active stream
+					if tab.chat.cancelFn != nil {
+						tab.chat.cancelFn()
+					}
+					tab.chat.streaming = false
+					break
+				}
+			}
+		}
+		return m, nil
 	}
 
 	// Chat streaming messages — route to active chat
 	switch msg := msg.(type) {
+	case spinner.TickMsg:
+		// Route spinner tick to active streaming chat
+		targetChat := m.chat
+		if m.state == viewAgent {
+			if tab := m.agents.active(); tab != nil {
+				targetChat = tab.chat
+			}
+		}
+		cmd := targetChat.Update(msg, m.width, m.contentHeight())
+		return m, cmd
+
 	case chatChunkMsg, chatReasoningMsg, chatDoneMsg, chatErrorMsg, chatToolCallMsg:
 		// Invariant: stream routes based on activeStreamOwner, not view state
 		targetChat := m.chat
@@ -379,13 +492,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case chatToolResultReady:
-		if m.state == viewAgent {
-			if tab := m.agents.active(); tab != nil {
-				tab.chat.messages = append(tab.chat.messages, msg.results...)
-				tab.chat.toolStatus = ""
-				tab.chat.scrollToBottom()
-				m.activeStreamOwner = tab.agentKey
-				return m, tab.chat.startStream()
+		// Route based on activeStreamOwner, not view state (bugfix)
+		if m.activeStreamOwner != "" {
+			for _, tab := range m.agents.tabs {
+				if tab.agentKey == m.activeStreamOwner {
+					tab.chat.messages = append(tab.chat.messages, msg.results...)
+					tab.chat.toolStatus = ""
+					tab.chat.scrollToBottom()
+					return m, tab.chat.startStream()
+				}
 			}
 		}
 		m.activeStreamOwner = ""
@@ -393,6 +508,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.chat.toolStatus = ""
 		m.chat.scrollToBottom()
 		return m, m.chat.startStream()
+
+	case chatToolResultWithAsk:
+		return m.handleAskDispatch(msg)
+
+	case chatToolResultWithAnswer:
+		return m.handleAnswerRoute(msg)
+
+	case chatToolResultWithPlanRequest:
+		return m.handlePlanRequest(msg)
 
 	case chatToolResultWithSpawn:
 		// Feed tool results back to orchestrator chat
@@ -406,25 +530,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Continue orchestrator streaming
 		return m, m.chat.startStream()
 
-	case taskContextReadyMsg:
-		if msg.err == nil {
-			m.chat.messages = append(m.chat.messages, chatMessage{
-				Role:    "user",
-				Content: "Analysera denna task och f\u00f6resl\u00e5 konkreta steg.",
-			})
-			return m, m.chat.startStream()
-		}
-		return m, nil
-
-	case planContextReadyMsg:
-		if msg.err == nil {
-			m.chat.messages = append(m.chat.messages, chatMessage{
-				Role:    "user",
-				Content: "Starta exekveringen. Implementera alla steg i planen i ordning.",
-			})
-			return m, m.chat.startStream()
-		}
-		return m, nil
 	}
 
 	return m, nil
@@ -471,13 +576,11 @@ func (m model) View() string {
 	case viewChat:
 		b.WriteString(m.chat.View(m.width, ch))
 	case viewDashboard:
-		b.WriteString(m.overlay.View(m.width, ch, m.tasks, m.proposals, m.plans, m.sessions, m.services, m.ws, m.tree, m.chatCl, m.agents, m.spawnInput, m.spawnBuf, m.activeChat().maxToolIter, m.agentSnapshot, m.workOrders))
+		b.WriteString(m.overlay.View(m.width, ch, m.tasks, m.proposals, m.plans, m.sessions, m.services, m.ws, m.tree, m.chatCl, m.agents, m.spawnInput, m.spawnBuf, m.activeChat().maxToolIter, m.agentSnapshot, m.workOrders, m.activeChat().meter.View()))
 	case viewAgent:
 		if tab := m.agents.active(); tab != nil {
 			b.WriteString(tab.chat.View(m.width, ch))
 		}
-	case viewAgentPicker:
-		b.WriteString(AgentPicker(m.width))
 	}
 
 	// Footer
@@ -487,24 +590,59 @@ func (m model) View() string {
 	return b.String()
 }
 
+// focusAgent switches UI focus to an agent tab (peek only — no controller change).
+// Auto-releases any previously human-controlled agent.
+func (m *model) focusAgent(idx int) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+	// Auto-release previous if human-controlled
+	if prev := m.agents.active(); prev != nil && prev.controller == "human" {
+		prev.controller = "idle"
+		cmds = append(cmds, releaseControlCmd(m.d, prev, "switched"))
+	}
+	// Focus new tab (peek only)
+	m.agents.activate(idx)
+	m.state = viewAgent
+	return m, tea.Batch(cmds...)
+}
+
+// isInputChar returns true if the key event is a text input character.
+func isInputChar(msg tea.KeyMsg) bool {
+	return msg.Type == tea.KeyRunes || msg.Type == tea.KeySpace
+}
+
+// releaseAllAgents releases all human-controlled agents (fire-and-forget).
+func (m *model) releaseAllAgents() []tea.Cmd {
+	var cmds []tea.Cmd
+	for _, tab := range m.agents.tabs {
+		if tab.controller == "human" {
+			tab.controller = "idle"
+			cmds = append(cmds, releaseControlCmd(m.d, tab, "quit"))
+		}
+	}
+	return cmds
+}
+
 func (m model) footer() string {
 	tabHint := "[tab] agents"
 	switch m.state {
 	case viewChat:
-		return tabHint + "  " + m.chat.FooterHelp()
+		return "[orchestrator]  " + tabHint + "  " + m.chat.FooterHelp()
 	case viewDashboard:
 		prefix := tabHint
 		if m.agentSnapshot != nil {
 			prefix = fmt.Sprintf("[%s rev:%d]", m.agentSnapshot.AgentKey, m.agentSnapshot.Revision)
 		}
-		return prefix + "  [h/l] column  [j/k] navigate  [enter] select  [å/ä] model  [p/ö] agent  [n] spawn  [t] tools  [c] clear+continue  [r] refresh"
+		return prefix + "  [h/l] column  [j/k] navigate  [enter] select  [/] filter  [å/ä] model  [n] spawn  [t] tools  [c] clear+continue  [r] refresh"
 	case viewAgent:
 		if tab := m.agents.active(); tab != nil {
-			agentHelp := fmt.Sprintf("[1-%d] switch  [tab] agents  [esc] back  ", m.agents.count())
-			return tabHint + "  " + agentHelp + tab.chat.FooterHelp()
+			ctrlHint := "peek"
+			if tab.controller == "human" {
+				ctrlHint = "controlling"
+			}
+			agentHelp := fmt.Sprintf("[%s] %s  [shift+tab] switch  [esc] back  [ctrl+p] pause  ",
+				tab.agentKey, ctrlHint)
+			return agentHelp + tab.chat.FooterHelp()
 		}
-	case viewAgentPicker:
-		return "[1-7] spawn  [esc/Shift+Tab] close"
 	}
 	return ""
 }
@@ -550,41 +688,21 @@ func (m *model) cycleAgentNext() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.state != viewAgent {
-		m.agents.activate(0)
-		m.state = viewAgent
-		return m, nil
+		return m.focusAgent(0)
 	}
 	nextIdx := m.agents.activeIdx + 1
 	if nextIdx < m.agents.count() {
-		m.agents.activate(nextIdx)
-		return m, nil
+		return m.focusAgent(nextIdx)
 	}
-	// Wrap back to chat
+	// Wrap back to chat — release if human-controlled
+	var cmds []tea.Cmd
+	if tab := m.agents.active(); tab != nil && tab.controller == "human" {
+		tab.controller = "idle"
+		cmds = append(cmds, releaseControlCmd(m.d, tab, "switched"))
+	}
 	m.agents.deactivate()
 	m.state = viewChat
-	return m, nil
-}
-
-// selectAgentByIndex activates agent at given index (0-5), or spawns new if none exists.
-func (m *model) selectAgentByIndex(idx int) (tea.Model, tea.Cmd) {
-	if idx < 0 || idx > 5 {
-		return m, nil
-	}
-	
-	// If agent already exists at this index, activate it
-	if idx < m.agents.count() {
-		m.agents.activate(idx)
-		m.state = viewAgent
-		return m, nil
-	}
-	
-	// Otherwise, open spawn dialog for this agent slot
-	// For now, just show agent picker
-	if m.agents.count() > 0 {
-		m.state = viewAgent
-		m.agents.activate(0)
-	}
-	return m, nil
+	return m, tea.Batch(cmds...)
 }
 
 // cycleAgentPrev activates the previous agent tab, or wraps to last.
@@ -593,29 +711,50 @@ func (m *model) cycleAgentPrev() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if m.state != viewAgent {
-		m.agents.activate(m.agents.count() - 1)
-		m.state = viewAgent
-		return m, nil
+		return m.focusAgent(m.agents.count() - 1)
 	}
 	if m.agents.activeIdx > 0 {
-		m.agents.activate(m.agents.activeIdx - 1)
-		return m, nil
+		return m.focusAgent(m.agents.activeIdx - 1)
 	}
-	// Wrap back to chat
+	// Wrap back to chat — release if human-controlled
+	var cmds []tea.Cmd
+	if tab := m.agents.active(); tab != nil && tab.controller == "human" {
+		tab.controller = "idle"
+		cmds = append(cmds, releaseControlCmd(m.d, tab, "switched"))
+	}
 	m.agents.deactivate()
 	m.state = viewChat
-	return m, nil
+	return m, tea.Batch(cmds...)
 }
 
-// spawnAgentByIndex spawns an agent by index (0-5) from AvailableAgents.
-// Deprecated: Use spawnAgentWithMission instead for better UX
-func (m *model) spawnAgentByIndex(idx int) (tea.Model, tea.Cmd) {
-	if idx < 0 || idx >= len(AvailableAgents) {
-		return m, nil
+// ensureTempTab returns an existing tab for agentKey or creates a new idle tab.
+// Used for non-favorite agents that need a temporary tab (e.g. via ask_agent or give_to_planner).
+func (m *model) ensureTempTab(agentKey string) *agentTab {
+	for _, tab := range m.agents.tabs {
+		if tab.agentKey == agentKey {
+			return tab
+		}
 	}
-
-	agent := AvailableAgents[idx]
-	return m, m.spawnAgentWithMission(agent.Key)
+	// Find def
+	var def *dash.AgentDef
+	for i := range m.allAgentDefs {
+		if m.allAgentDefs[i].Key == agentKey {
+			def = &m.allAgentDefs[i]
+			break
+		}
+	}
+	displayName := agentKey
+	mission := ""
+	if def != nil {
+		displayName = def.DisplayName
+		mission = def.Mission
+	}
+	agentChat := newChatModel(m.chatCl, m.d, "")
+	agentChat.scopedAgent = agentKey
+	agentChat.agentMission = mission
+	tab := m.agents.spawn(displayName, agentKey, "", "", "", agentChat)
+	tab.controller = "idle"
+	return tab
 }
 
 func (m *model) spawnAgentTab(info agentSpawnInfo) {
@@ -646,25 +785,15 @@ func (m *model) handleOverlayAction(action string) tea.Cmd {
 	switch {
 	case strings.HasPrefix(action, "task:"):
 		taskName := strings.TrimPrefix(action, "task:")
-		m.chat.scopedTask = taskName
-		m.chat.scopedPlan = ""
-		m.chat.messages = nil
-		m.chat.errMsg = ""
-		m.chat.scrollY = 0
-		m.chat.runMode = false
+		m.chat.messages = append(m.chat.messages, chatMessage{Role: "user", Content: "Arbeta med task: " + taskName})
 		m.state = viewChat
-		return refreshTaskContext(m.d, taskName)
+		return m.chat.startStream()
 
 	case strings.HasPrefix(action, "plan:"):
 		planName := strings.TrimPrefix(action, "plan:")
-		m.chat.scopedPlan = planName
-		m.chat.scopedTask = ""
-		m.chat.messages = nil
-		m.chat.errMsg = ""
-		m.chat.scrollY = 0
-		m.chat.runMode = true
+		m.chat.messages = append(m.chat.messages, chatMessage{Role: "user", Content: "Kör plan: " + planName})
 		m.state = viewChat
-		return refreshPlanContext(m.d, planName)
+		return m.chat.startStream()
 
 	case action == "refresh":
 		return tea.Batch(fetchDashData(m.d), fetchIntel(m.d))
@@ -762,6 +891,190 @@ func topNFiles(counts map[string]int, n int) []string {
 		result = append(result, all[i].file)
 	}
 	return result
+}
+
+// handlePlanRequest processes a chatToolResultWithPlanRequest: fire-and-forget to planner.
+func (m *model) handlePlanRequest(msg chatToolResultWithPlanRequest) (tea.Model, tea.Cmd) {
+	// 1. Feed tool results back to caller's chat (NOT blocked — fire-and-forget)
+	callerChat := m.activeStreamChat()
+	if callerChat != nil {
+		callerChat.messages = append(callerChat.messages, msg.results...)
+		callerChat.toolStatus = ""
+		callerChat.scrollToBottom()
+	}
+
+	// 2. Ensure planner tab exists (should be favorite, but ensureTempTab handles it)
+	plannerTab := m.ensureTempTab("planner-agent")
+
+	// 3. Inject request as user message in planner tab
+	reqMsg := fmt.Sprintf("── PLAN REQUEST (%s) ──\n%s", msg.requestID, msg.desc)
+	if msg.context != "" {
+		reqMsg += fmt.Sprintf("\n\nKontext: %s", msg.context)
+	}
+	if msg.priority != "" {
+		reqMsg += fmt.Sprintf("\nPrioritet: %s", msg.priority)
+	}
+	plannerTab.chat.messages = append(plannerTab.chat.messages, chatMessage{
+		Role:    "user",
+		Content: reqMsg,
+	})
+	plannerTab.chat.toolIter = 0
+	plannerTab.chat.scrollToBottom()
+
+	// 4. Restart caller stream immediately (fire-and-forget)
+	var cmds []tea.Cmd
+	if m.activeStreamOwner != "" {
+		cmds = append(cmds, callerChat.startStream())
+	} else {
+		m.activeStreamOwner = ""
+		cmds = append(cmds, m.chat.startStream())
+	}
+
+	// 5. Lazy spawn planner if idle, then queue stream
+	if plannerTab.status == agentIdle {
+		plannerTab.status = agentSpawned
+		plannerTab.chat.toolStatus = "spawning planner..."
+		cmds = append(cmds, m.spawnAgentWithMission("planner-agent"))
+	}
+	// If planner is already active but no stream running, it'll pick up on next turn
+
+	return m, tea.Batch(cmds...)
+}
+
+// handleAskDispatch processes a chatToolResultWithAsk: caller dispatched a question.
+func (m *model) handleAskDispatch(msg chatToolResultWithAsk) (tea.Model, tea.Cmd) {
+	q := msg.query
+
+	// 1. Feed tool results into caller's chat but do NOT restart stream
+	callerChat := m.chatForAgent(q.callerKey)
+	if callerChat != nil {
+		callerChat.messages = append(callerChat.messages, msg.results...)
+		callerChat.toolStatus = fmt.Sprintf("waiting for %s...", q.targetKey)
+		callerChat.scrollToBottom()
+	}
+
+	// 2. Store in pendingQueries
+	m.pendingQueries[q.id] = &q
+
+	// 3. Find target agent tab
+	var targetTab *agentTab
+	for _, tab := range m.agents.tabs {
+		if tab.agentKey == q.targetKey {
+			targetTab = tab
+			break
+		}
+	}
+
+	if targetTab == nil {
+		// Target not found — return error to caller
+		if callerChat != nil {
+			callerChat.toolStatus = ""
+			callerChat.addSystemMessage(fmt.Sprintf("ask_agent error: agent %q not found", q.targetKey))
+		}
+		delete(m.pendingQueries, q.id)
+		m.activeStreamOwner = q.callerKey
+		if callerChat != nil {
+			return m, callerChat.startStream()
+		}
+		return m, nil
+	}
+
+	// 4. Set target as answering this query
+	targetTab.answeringQuery = &q
+	targetTab.chat.answeringQueryInfo = &q
+
+	// 5. Inject question as user message with system marker
+	marker := fmt.Sprintf("── FRÅGA FRÅN %s (query_id: %s) ──\n%s", q.callerKey, q.id, q.question)
+	targetTab.chat.messages = append(targetTab.chat.messages, chatMessage{
+		Role:    "user",
+		Content: marker,
+	})
+	targetTab.chat.toolIter = 0
+	targetTab.chat.scrollToBottom()
+
+	// 6. Lazy spawn if idle, otherwise start stream
+	if targetTab.status == agentIdle {
+		targetTab.pendingMessage = "" // question already injected
+		targetTab.status = agentSpawned
+		targetTab.chat.toolStatus = "spawning agent..."
+		return m, m.spawnAgentWithMission(targetTab.agentKey)
+	}
+
+	m.activeStreamOwner = targetTab.agentKey
+	return m, targetTab.chat.startStream()
+}
+
+// handleAnswerRoute processes a chatToolResultWithAnswer: target committed an answer.
+func (m *model) handleAnswerRoute(msg chatToolResultWithAnswer) (tea.Model, tea.Cmd) {
+	// 1. Feed tool results into target's chat
+	targetChat := m.activeStreamChat()
+	if targetChat != nil {
+		targetChat.messages = append(targetChat.messages, msg.results...)
+		targetChat.toolStatus = ""
+		targetChat.scrollToBottom()
+	}
+
+	// 2. Look up the pending query
+	pq, ok := m.pendingQueries[msg.queryID]
+	if !ok {
+		// No pending query — discard (caller may have been cancelled)
+		m.activeStreamOwner = ""
+		return m, nil
+	}
+
+	// 3. Replace caller's "dispatched" tool result with the real answer
+	callerChat := m.chatForAgent(pq.callerKey)
+	if callerChat != nil {
+		answerContent := fmt.Sprintf(`{"query_id":%q,"answer":%q,"from":%q}`, msg.queryID, msg.answer, pq.targetKey)
+		replaceToolResult(callerChat.messages, pq.toolCallID, answerContent)
+		callerChat.toolStatus = ""
+	}
+
+	// 4. Reset target tab's answeringQuery
+	for _, tab := range m.agents.tabs {
+		if tab.agentKey == pq.targetKey {
+			tab.answeringQuery = nil
+			tab.chat.answeringQueryInfo = nil
+			break
+		}
+	}
+
+	// 5. Clean up
+	delete(m.pendingQueries, msg.queryID)
+
+	// 6. Restart caller's stream
+	m.activeStreamOwner = pq.callerKey
+	if callerChat != nil {
+		return m, callerChat.startStream()
+	}
+	m.activeStreamOwner = ""
+	return m, nil
+}
+
+// chatForAgent returns the chatModel for a given agent key ("orchestrator" = main chat).
+func (m *model) chatForAgent(agentKey string) *chatModel {
+	if agentKey == "orchestrator" || agentKey == "" {
+		return m.chat
+	}
+	for _, tab := range m.agents.tabs {
+		if tab.agentKey == agentKey {
+			return tab.chat
+		}
+	}
+	return nil
+}
+
+// activeStreamChat returns the chatModel that currently owns the stream.
+func (m *model) activeStreamChat() *chatModel {
+	if m.activeStreamOwner == "" {
+		return m.chat
+	}
+	for _, tab := range m.agents.tabs {
+		if tab.agentKey == m.activeStreamOwner {
+			return tab.chat
+		}
+	}
+	return m.chat
 }
 
 // spawnAgentResultMsg is sent when an agent spawn completes.
