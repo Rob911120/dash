@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 )
@@ -236,6 +235,7 @@ func streamOpenAI(ctx context.Context, client *http.Client, prov ProviderConfig,
 		Model:            model,
 		Messages:         translateToOpenAI(messages),
 		Stream:           true,
+		MaxTokens:        4096,
 		IncludeReasoning: true,
 		StreamOptions:    &openAIStreamOpts{IncludeUsage: true},
 	}
@@ -250,9 +250,7 @@ func streamOpenAI(ctx context.Context, client *http.Client, prov ProviderConfig,
 		return
 	}
 
-	if os.Getenv("DASH_LLM_DEBUG") != "" {
-		llmDebugLogPayloadSize("openai", model, bodyBytes, len(tools))
-	}
+	LLMLogRequest(ctx, prov, model, messages, tools, len(bodyBytes))
 
 	var resp *http.Response
 	for attempt := 0; attempt < 2; attempt++ {
@@ -278,7 +276,9 @@ func streamOpenAI(ctx context.Context, client *http.Client, prov ProviderConfig,
 	if resp.StatusCode != http.StatusOK {
 		var errBuf bytes.Buffer
 		errBuf.ReadFrom(resp.Body)
-		ch <- StreamEvent{Type: EventError, Error: fmt.Errorf("API %d: %s", resp.StatusCode, errBuf.String())}
+		apiErr := fmt.Errorf("API %d: %s", resp.StatusCode, errBuf.String())
+		LLMLogStreamEnd(ctx, model, 0, 0, nil, apiErr)
+		ch <- StreamEvent{Type: EventError, Error: apiErr}
 		return
 	}
 
@@ -298,6 +298,7 @@ func streamOpenAI(ctx context.Context, client *http.Client, prov ProviderConfig,
 	})
 	hasToolCalls := false
 	var lastUsage *TokenUsage
+	var contentLen int
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
@@ -308,6 +309,7 @@ func streamOpenAI(ctx context.Context, client *http.Client, prov ProviderConfig,
 		}
 		data := strings.TrimPrefix(line, "data: ")
 		if data == "[DONE]" {
+			tcCount := 0
 			if hasToolCalls {
 				var calls []StreamToolCall
 				for i := 0; i < len(toolCalls); i++ {
@@ -319,11 +321,13 @@ func streamOpenAI(ctx context.Context, client *http.Client, prov ProviderConfig,
 						})
 					}
 				}
+				tcCount = len(calls)
 				ch <- StreamEvent{Type: EventToolCall, ToolCalls: calls}
 			}
 			if lastUsage != nil {
 				ch <- StreamEvent{Type: EventUsage, Usage: lastUsage}
 			}
+			LLMLogStreamEnd(ctx, model, contentLen, tcCount, lastUsage, nil)
 			ch <- StreamEvent{Type: EventDone}
 			return
 		}
@@ -349,7 +353,9 @@ func streamOpenAI(ctx context.Context, client *http.Client, prov ProviderConfig,
 			continue
 		}
 		if chunk.Error != nil && chunk.Error.Message != "" {
-			ch <- StreamEvent{Type: EventError, Error: fmt.Errorf("API: %s", chunk.Error.Message)}
+			apiErr := fmt.Errorf("API: %s", chunk.Error.Message)
+			LLMLogStreamEnd(ctx, model, contentLen, 0, nil, apiErr)
+			ch <- StreamEvent{Type: EventError, Error: apiErr}
 			return
 		}
 		if chunk.Usage != nil {
@@ -367,6 +373,7 @@ func streamOpenAI(ctx context.Context, client *http.Client, prov ProviderConfig,
 			ch <- StreamEvent{Type: EventReasoning, Reasoning: delta.Reasoning}
 		}
 		if delta.Content != "" {
+			contentLen += len(delta.Content)
 			ch <- StreamEvent{Type: EventContent, Content: delta.Content}
 		}
 		for _, tc := range delta.ToolCalls {
@@ -392,10 +399,13 @@ func streamOpenAI(ctx context.Context, client *http.Client, prov ProviderConfig,
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		ch <- StreamEvent{Type: EventError, Error: fmt.Errorf("scan: %w", err)}
+		scanErr := fmt.Errorf("scan: %w", err)
+		LLMLogStreamEnd(ctx, model, contentLen, 0, nil, scanErr)
+		ch <- StreamEvent{Type: EventError, Error: scanErr}
 		return
 	}
 	// Stream ended without [DONE] — emit what we have
+	tcCount := 0
 	if hasToolCalls {
 		var calls []StreamToolCall
 		for i := 0; i < len(toolCalls); i++ {
@@ -407,10 +417,12 @@ func streamOpenAI(ctx context.Context, client *http.Client, prov ProviderConfig,
 				})
 			}
 		}
+		tcCount = len(calls)
 		ch <- StreamEvent{Type: EventToolCall, ToolCalls: calls}
 	}
 	if lastUsage != nil {
 		ch <- StreamEvent{Type: EventUsage, Usage: lastUsage}
 	}
+	LLMLogStreamEnd(ctx, model, contentLen, tcCount, lastUsage, nil)
 	ch <- StreamEvent{Type: EventDone}
 }

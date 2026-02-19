@@ -45,12 +45,27 @@ type streamToolCall struct {
 	ArgsBuf strings.Builder
 }
 
-// Chat streaming message types
-type chatChunkMsg struct{ chunk string }
-type chatReasoningMsg struct{ chunk string }
-type chatDoneMsg struct{ usage *apiUsage }
-type chatErrorMsg struct{ err error }
-type chatToolCallMsg struct{ calls []streamToolCall }
+// Chat streaming message types — every type carries owner for routing.
+type chatChunkMsg struct {
+	owner string
+	chunk string
+}
+type chatReasoningMsg struct {
+	owner string
+	chunk string
+}
+type chatDoneMsg struct {
+	owner string
+	usage *apiUsage
+}
+type chatErrorMsg struct {
+	owner string
+	err   error
+}
+type chatToolCallMsg struct {
+	owner string
+	calls []streamToolCall
+}
 
 type apiUsage struct {
 	PromptTokens     int `json:"prompt_tokens"`
@@ -129,13 +144,31 @@ func (c *chatClient) contextLimit() int {
 	return c.router.ContextLimit(c.model)
 }
 
-func waitForChatMsg(ch <-chan any) tea.Cmd {
+func waitForChatMsg(ch <-chan any, owner string) tea.Cmd {
 	return func() tea.Msg {
-		msg, ok := <-ch
+		raw, ok := <-ch
 		if !ok {
-			return chatDoneMsg{}
+			return chatDoneMsg{owner: owner}
 		}
-		return msg.(tea.Msg)
+		switch m := raw.(type) {
+		case chatChunkMsg:
+			m.owner = owner
+			return m
+		case chatReasoningMsg:
+			m.owner = owner
+			return m
+		case chatDoneMsg:
+			m.owner = owner
+			return m
+		case chatErrorMsg:
+			m.owner = owner
+			return m
+		case chatToolCallMsg:
+			m.owner = owner
+			return m
+		default:
+			return raw.(tea.Msg)
+		}
 	}
 }
 

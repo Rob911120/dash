@@ -100,20 +100,17 @@ func (m *chatModel) Update(msg tea.Msg, width, height int) tea.Cmd {
 		return cmd
 
 	case spinner.TickMsg:
-		if m.streaming {
-			var cmd tea.Cmd
-			m.thinkSpinner, cmd = m.thinkSpinner.Update(msg)
-			return cmd
-		}
+		// Spinner ticks are broadcast globally by model — just update state.
+		m.tickSpinner(msg)
 		return nil
 
 	case chatReasoningMsg:
 		m.reasoningBuf += msg.chunk
-		return waitForChatMsg(m.streamCh)
+		return waitForChatMsg(m.streamCh, m.scopedAgent)
 
 	case chatChunkMsg:
 		m.streamBuf += msg.chunk
-		return waitForChatMsg(m.streamCh)
+		return waitForChatMsg(m.streamCh, m.scopedAgent)
 
 	case chatToolCallMsg:
 		m.streaming = false
@@ -348,7 +345,7 @@ func (m *chatModel) startStream() tea.Cmd {
 		tools = filtered
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(dash.WithLLMAgent(context.Background(), m.scopedAgent))
 	ch := make(chan any, 64)
 	m.streaming = true
 	m.streamBuf = ""
@@ -358,7 +355,7 @@ func (m *chatModel) startStream() tea.Cmd {
 	m.scrollToBottom()
 
 	go m.client.StreamWithTools(ctx, apiMsgs, tools, ch)
-	return tea.Batch(waitForChatMsg(ch), m.thinkSpinner.Tick)
+	return waitForChatMsg(ch, m.scopedAgent)
 }
 
 // filteredTools returns tools filtered by the current profile's toolset,
@@ -472,6 +469,13 @@ func (m *chatModel) storeReasoning(reasoning, response string) {
 			"model":     m.client.model,
 		})
 	}()
+}
+
+// tickSpinner advances the spinner animation if streaming.
+func (m *chatModel) tickSpinner(msg spinner.TickMsg) {
+	if m.streaming {
+		m.thinkSpinner, _ = m.thinkSpinner.Update(msg)
+	}
 }
 
 func (m *chatModel) scrollToBottom() {

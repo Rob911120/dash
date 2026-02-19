@@ -8,6 +8,7 @@ import (
 	"dash"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type agentStatus int
@@ -226,13 +227,15 @@ func (am *agentManager) tabBar(width int) string {
 		// Name: full for focused, short for unfocused
 		name := t.displayName
 		if !isFocused {
-			// Extract short key from agent key (e.g. "cockpit-backend" → "back")
-			name = t.agentKey
-			if idx := strings.LastIndex(name, "-"); idx >= 0 && idx+1 < len(name) {
-				name = name[idx+1:]
+			// Use display name (already human-readable) or extract short key from agent key
+			if t.displayName == "" {
+				name = t.agentKey
+				if idx := strings.LastIndex(name, "-"); idx >= 0 && idx+1 < len(name) {
+					name = name[idx+1:]
+				}
 			}
-			if len(name) > 5 {
-				name = name[:5]
+			if len(name) > 8 {
+				name = name[:8]
 			}
 		}
 
@@ -267,7 +270,12 @@ func (am *agentManager) tabBar(width int) string {
 		parts = append(parts, style.Render(label))
 	}
 
-	return strings.Join(parts, "")
+	result := strings.Join(parts, "")
+	// Truncate to terminal width to prevent wrapping
+	if lipgloss.Width(result) > width {
+		result = ansi.Truncate(result, width, "…")
+	}
+	return result
 }
 
 // woStatusIconStr returns a status icon string for a work order status.

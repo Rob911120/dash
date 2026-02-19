@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 )
@@ -65,13 +64,33 @@ type anthropicResponse struct {
 // Consecutive tool results are merged into a single user message with multiple
 // tool_result content blocks (required by the Anthropic API).
 func translateToAnthropic(messages []ChatMessage) (system string, out []anthropicMessage) {
+	// First pass: collect all tool_use IDs from assistant messages
+	// so we can drop orphaned tool_results that would cause API errors.
+	knownToolUseIDs := make(map[string]bool)
+	for _, m := range messages {
+		if m.Role == "assistant" {
+			for _, tc := range m.ToolCalls {
+				knownToolUseIDs[tc.ID] = true
+			}
+		}
+	}
+
 	for _, m := range messages {
 		if m.Role == "system" {
 			system = m.Content
 			continue
 		}
 
+		// Skip TUI-internal roles that are not valid API roles.
+		if m.Role != "user" && m.Role != "assistant" && m.Role != "tool" {
+			continue
+		}
+
 		if m.Role == "tool" {
+			// Drop orphaned tool_results whose tool_use ID is missing.
+			if m.ToolCallID != "" && !knownToolUseIDs[m.ToolCallID] {
+				continue
+			}
 			block := anthropicContentBlock{
 				Type:      "tool_result",
 				ToolUseID: m.ToolCallID,
@@ -238,9 +257,7 @@ func streamAnthropic(ctx context.Context, client *http.Client, prov ProviderConf
 		return
 	}
 
-	if os.Getenv("DASH_LLM_DEBUG") != "" {
-		llmDebugLogPayloadSize("anthropic", model, bodyBytes, len(tools))
-	}
+	LLMLogRequest(ctx, prov, model, messages, tools, len(bodyBytes))
 
 	var resp *http.Response
 	for attempt := 0; attempt < 2; attempt++ {
@@ -266,7 +283,9 @@ func streamAnthropic(ctx context.Context, client *http.Client, prov ProviderConf
 	if resp.StatusCode != http.StatusOK {
 		var errBuf bytes.Buffer
 		errBuf.ReadFrom(resp.Body)
-		ch <- StreamEvent{Type: EventError, Error: fmt.Errorf("API %d: %s", resp.StatusCode, errBuf.String())}
+		apiErr := fmt.Errorf("API %d: %s", resp.StatusCode, errBuf.String())
+		LLMLogStreamEnd(ctx, model, 0, 0, nil, apiErr)
+		ch <- StreamEvent{Type: EventError, Error: apiErr}
 		return
 	}
 
@@ -279,6 +298,7 @@ func streamAnthropic(ctx context.Context, client *http.Client, prov ProviderConf
 	}
 	blocks := make(map[int]*blockInfo)
 	var pendingToolCalls []StreamToolCall
+	var contentLen int
 
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 256*1024), 256*1024)
@@ -331,6 +351,7 @@ func streamAnthropic(ctx context.Context, client *http.Client, prov ProviderConf
 			switch ev.Delta.Type {
 			case "text_delta":
 				if ev.Delta.Text != "" {
+					contentLen += len(ev.Delta.Text)
 					ch <- StreamEvent{Type: EventContent, Content: ev.Delta.Text}
 				}
 			case "thinking_delta":
@@ -374,6 +395,7 @@ func streamAnthropic(ctx context.Context, client *http.Client, prov ProviderConf
 			if len(pendingToolCalls) > 0 {
 				ch <- StreamEvent{Type: EventToolCall, ToolCalls: pendingToolCalls}
 			}
+			LLMLogStreamEnd(ctx, model, contentLen, len(pendingToolCalls), nil, nil)
 			ch <- StreamEvent{Type: EventDone}
 			return
 
@@ -384,14 +406,18 @@ func streamAnthropic(ctx context.Context, client *http.Client, prov ProviderConf
 				} `json:"error"`
 			}
 			if json.Unmarshal([]byte(data), &ev) == nil {
-				ch <- StreamEvent{Type: EventError, Error: fmt.Errorf("anthropic: %s", ev.Error.Message)}
+				sseErr := fmt.Errorf("anthropic: %s", ev.Error.Message)
+				LLMLogStreamEnd(ctx, model, contentLen, 0, nil, sseErr)
+				ch <- StreamEvent{Type: EventError, Error: sseErr}
 			}
 			return
 		}
 	}
 
 	if err := scanner.Err(); err != nil {
-		ch <- StreamEvent{Type: EventError, Error: fmt.Errorf("scan: %w", err)}
+		scanErr := fmt.Errorf("scan: %w", err)
+		LLMLogStreamEnd(ctx, model, contentLen, 0, nil, scanErr)
+		ch <- StreamEvent{Type: EventError, Error: scanErr}
 		return
 	}
 
@@ -399,5 +425,6 @@ func streamAnthropic(ctx context.Context, client *http.Client, prov ProviderConf
 	if len(pendingToolCalls) > 0 {
 		ch <- StreamEvent{Type: EventToolCall, ToolCalls: pendingToolCalls}
 	}
+	LLMLogStreamEnd(ctx, model, contentLen, len(pendingToolCalls), nil, nil)
 	ch <- StreamEvent{Type: EventDone}
 }

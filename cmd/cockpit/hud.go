@@ -5,6 +5,9 @@ import (
 	"strings"
 
 	"dash"
+
+	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type hudModel struct{}
@@ -67,9 +70,15 @@ func (h hudModel) View(ws *dash.WorkingSet, services []serviceStatus, streaming 
 		line1.WriteString(" ")
 	}
 
+	// Ensure line1 fits within innerW to prevent lipgloss wrapping inside the border box.
+	line1Str := line1.String()
+	if lipgloss.Width(line1Str) > innerW {
+		line1Str = ansi.Truncate(line1Str, innerW, "…")
+	}
+
 	// Build content
 	var content strings.Builder
-	content.WriteString(line1.String())
+	content.WriteString(line1Str)
 
 	if blockers != "" {
 		content.WriteString("\n")

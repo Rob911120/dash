@@ -12,9 +12,6 @@ import (
 )
 
 func main() {
-	// Clear debug log on startup
-	os.Remove("debug.log")
-
 	db, err := dash.ConnectDB()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "cockpit: %v\n", err)

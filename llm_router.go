@@ -2,11 +2,8 @@ package dash
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
-	"os"
 	"sort"
 	"sync"
 	"time"
@@ -155,38 +152,6 @@ func (r *LLMRouter) CompleteWithRole(ctx context.Context, role, systemPrompt, us
 	}
 }
 
-// llmDebugLog writes a debug entry for an LLM request (provider-agnostic, ChatMessage format).
-func llmDebugLog(prov ProviderConfig, model string, messages []ChatMessage, tools []map[string]any) {
-	f, err := os.OpenFile("debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	dbg := log.New(f, "[llm-debug] ", 0)
-
-	dbg.Printf("provider=%s model=%s format=%s url=%s tools=%d msgs=%d",
-		prov.Name, model, prov.Format, prov.BaseURL, len(tools), len(messages))
-	for i, msg := range messages {
-		msgJSON, _ := json.Marshal(msg)
-		preview := string(msgJSON)
-		if len(preview) > 500 {
-			preview = preview[:500] + "..."
-		}
-		dbg.Printf("  msg[%d]: %s", i, preview)
-	}
-}
-
-// llmDebugLogPayloadSize logs the serialized request body size.
-func llmDebugLogPayloadSize(format, model string, bodyBytes []byte, toolCount int) {
-	f, err := os.OpenFile("debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	dbg := log.New(f, "[llm-payload] ", 0)
-	dbg.Printf("format=%s model=%s payload_bytes=%d tools=%d", format, model, len(bodyBytes), toolCount)
-}
-
 // --- Streaming ---
 
 // Stream sends a streaming chat completion for the given role and returns a channel of events.
@@ -200,10 +165,6 @@ func (r *LLMRouter) Stream(ctx context.Context, role string, messages []ChatMess
 			ch <- StreamEvent{Type: EventError, Error: err}
 			ch <- StreamEvent{Type: EventDone}
 			return
-		}
-
-		if os.Getenv("DASH_LLM_DEBUG") != "" {
-			llmDebugLog(prov, rc.Model, messages, tools)
 		}
 
 		switch prov.Format {
@@ -235,10 +196,6 @@ func (r *LLMRouter) StreamWithModel(ctx context.Context, model string, messages 
 		// Strip tools for providers that don't support them
 		if !prov.SupportsTools {
 			tools = nil
-		}
-
-		if os.Getenv("DASH_LLM_DEBUG") != "" {
-			llmDebugLog(prov, model, messages, tools)
 		}
 
 		switch prov.Format {

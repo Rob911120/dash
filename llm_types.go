@@ -1,6 +1,26 @@
 package dash
 
-import "encoding/json"
+import (
+	"context"
+	"encoding/json"
+)
+
+type llmContextKey string
+
+const llmAgentKey llmContextKey = "llm-agent"
+
+// WithLLMAgent attaches an agent name to the context for per-agent API logging.
+func WithLLMAgent(ctx context.Context, agent string) context.Context {
+	return context.WithValue(ctx, llmAgentKey, agent)
+}
+
+// LLMAgentFromContext extracts the agent name, defaulting to "default".
+func LLMAgentFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(llmAgentKey).(string); ok && v != "" {
+		return v
+	}
+	return "default"
+}
 
 // APIFormat represents the API wire format used by a provider.
 type APIFormat string
