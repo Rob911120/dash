@@ -274,6 +274,45 @@ func TestCreatePRRequiresAuth(t *testing.T) {
 	}
 }
 
+// TestCommitAllIn verifies the fake CommitAllIn appends to Commits.
+func TestCommitAllIn(t *testing.T) {
+	gc := NewFakeGitClient()
+	if err := gc.CommitAllIn("/tmp/test", "patch commit"); err != nil {
+		t.Fatalf("CommitAllIn: %v", err)
+	}
+	if len(gc.Commits) != 1 || gc.Commits[0] != "patch commit" {
+		t.Errorf("Commits = %v, want [\"patch commit\"]", gc.Commits)
+	}
+}
+
+// TestShowFileAtRef verifies the fake ShowFileAtRef looks up BaseFiles.
+func TestShowFileAtRef(t *testing.T) {
+	gc := NewFakeGitClient()
+	gc.BaseFiles["main:foo.go"] = "package foo\n"
+
+	content, err := gc.ShowFileAtRef("main", "foo.go")
+	if err != nil {
+		t.Fatalf("ShowFileAtRef: %v", err)
+	}
+	if string(content) != "package foo\n" {
+		t.Errorf("content = %q, want %q", string(content), "package foo\n")
+	}
+
+	// Missing file should error
+	_, err = gc.ShowFileAtRef("main", "missing.go")
+	if err == nil {
+		t.Error("ShowFileAtRef should error for missing file")
+	}
+}
+
+// TestUpdateBranchRef verifies the fake UpdateBranchRef is a no-op.
+func TestUpdateBranchRef(t *testing.T) {
+	gc := NewFakeGitClient()
+	if err := gc.UpdateBranchRef("feature/x", "/tmp/wt"); err != nil {
+		t.Fatalf("UpdateBranchRef: %v", err)
+	}
+}
+
 // TestInterfaceCompliance ensures both implementations satisfy GitClient.
 func TestInterfaceCompliance(t *testing.T) {
 	var _ GitClient = (*ExecGitClient)(nil)

@@ -12,7 +12,7 @@ func TestBuildGateNoBranch(t *testing.T) {
 		Node: &Node{ID: uuid.New()},
 		// No BranchName
 	}
-	_, err := RunBuildGate(gc, wo)
+	_, err := RunBuildGate(gc, wo, "")
 	if err == nil {
 		t.Fatal("expected error for missing branch name")
 	}
@@ -30,7 +30,7 @@ func TestBuildGateScopeBlock(t *testing.T) {
 		ScopePaths: []string{"/dash/"},
 	}
 
-	result, err := RunBuildGate(gc, wo)
+	result, err := RunBuildGate(gc, wo, "")
 	if err != nil {
 		t.Fatalf("RunBuildGate: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestBuildGateWorktreeCleanup(t *testing.T) {
 		ScopePaths: []string{"/dash/"},
 	}
 
-	_, _ = RunBuildGate(gc, wo)
+	_, _ = RunBuildGate(gc, wo, "")
 
 	// Verify worktree was cleaned up
 	if len(gc.Worktrees) != 0 {
@@ -68,5 +68,30 @@ func TestBuildGateGoEnvCapture(t *testing.T) {
 	}
 	if env["GOARCH"] == "" {
 		t.Error("expected GOARCH to be captured")
+	}
+}
+
+func TestBuildGateWithExternalWorktree(t *testing.T) {
+	gc := NewFakeGitClient()
+	gc.Branches["agent/test/ext"] = true
+
+	wo := &WorkOrder{
+		Node:       &Node{ID: uuid.New()},
+		BranchName: "agent/test/ext",
+		BaseBranch: "main",
+		ScopePaths: []string{"/dash/"},
+	}
+
+	// Pre-create a worktree (simulating caller-managed lifecycle)
+	wtPath := "/tmp/dash-wo/ext-test"
+	if err := gc.AddWorktree(wtPath, wo.BranchName); err != nil {
+		t.Fatalf("AddWorktree: %v", err)
+	}
+
+	_, _ = RunBuildGate(gc, wo, wtPath)
+
+	// Worktree should NOT be cleaned up — caller owns it
+	if _, exists := gc.Worktrees[wtPath]; !exists {
+		t.Error("caller-managed worktree should NOT be removed by RunBuildGate")
 	}
 }

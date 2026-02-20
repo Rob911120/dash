@@ -27,14 +27,17 @@ type GitClient interface {
 	CreateBranch(name string) error
 	CheckoutBranch(name string) error
 	CommitAll(message string) error
+	CommitAllIn(dir, message string) error
 	CurrentHash() (string, error)
 	ChangedFiles(baseBranch string) ([]string, error)
 	UnifiedDiff(baseBranch string) (string, error)
+	ShowFileAtRef(ref, filePath string) ([]byte, error)
 	PushBranch(name string) error
 	CreatePR(title, body, base string) (prNum int, prURL string, err error)
 	MergePR(prNum int) error
 	AddWorktree(path, branch string) error
 	RemoveWorktree(path string) error
+	UpdateBranchRef(branch, dir string) error
 	PRChecksStatus(prNum int) (string, error)
 	Status() (*GitStatus, error)
 	GHAuthCheck() error
@@ -120,6 +123,42 @@ func (g *ExecGitClient) CommitAll(message string) error {
 	}
 	_, err := g.run("git", "commit", "-m", message)
 	return err
+}
+
+// CommitAllIn stages all changes and commits with the given message in the specified directory.
+func (g *ExecGitClient) CommitAllIn(dir, message string) error {
+	addCmd := exec.Command("git", "add", "-A")
+	addCmd.Dir = dir
+	var stderr bytes.Buffer
+	addCmd.Stderr = &stderr
+	if err := addCmd.Run(); err != nil {
+		return fmt.Errorf("git add -A in %s: %s", dir, stderr.String())
+	}
+
+	commitCmd := exec.Command("git", "commit", "-m", message)
+	commitCmd.Dir = dir
+	commitCmd.Stderr = &stderr
+	if err := commitCmd.Run(); err != nil {
+		return fmt.Errorf("git commit in %s: %s", dir, stderr.String())
+	}
+	return nil
+}
+
+// ShowFileAtRef returns the contents of a file at a given git ref (e.g. "main:path/to/file.go").
+func (g *ExecGitClient) ShowFileAtRef(ref, filePath string) ([]byte, error) {
+	return g.run("git", "show", ref+":"+filePath)
+}
+
+// UpdateBranchRef force-updates a branch to point at HEAD, executed from dir.
+func (g *ExecGitClient) UpdateBranchRef(branch, dir string) error {
+	cmd := exec.Command("git", "branch", "-f", branch, "HEAD")
+	cmd.Dir = dir
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("git branch -f %s HEAD in %s: %s", branch, dir, stderr.String())
+	}
+	return nil
 }
 
 // CurrentHash returns the full SHA of HEAD.
@@ -213,8 +252,11 @@ func (g *ExecGitClient) PRChecksStatus(prNum int) (string, error) {
 }
 
 // AddWorktree creates a linked worktree at path for branch.
+// Uses --detach so the branch doesn't need to be "free" — it can
+// remain checked out in the main repo while the worktree gets a
+// detached HEAD at the same commit.
 func (g *ExecGitClient) AddWorktree(path, branch string) error {
-	_, err := g.run("git", "worktree", "add", path, branch)
+	_, err := g.run("git", "worktree", "add", "--detach", path, branch)
 	return err
 }
 
@@ -256,6 +298,7 @@ type FakeGitClient struct {
 	Branches      map[string]bool
 	CurrentBranch string
 	Files         map[string]string // filename -> content
+	BaseFiles     map[string]string // "ref:path" -> content, for ShowFileAtRef
 	Commits       []string
 	Worktrees     map[string]string // path -> branch
 	PRs           map[int]FakePR
@@ -270,6 +313,7 @@ func NewFakeGitClient() *FakeGitClient {
 		Branches:      map[string]bool{"main": true},
 		CurrentBranch: "main",
 		Files:         make(map[string]string),
+		BaseFiles:     make(map[string]string),
 		Commits:       nil,
 		Worktrees:     make(map[string]string),
 		PRs:           make(map[int]FakePR),
@@ -306,6 +350,33 @@ func (f *FakeGitClient) CommitAll(message string) error {
 		return f.Err
 	}
 	f.Commits = append(f.Commits, message)
+	return nil
+}
+
+func (f *FakeGitClient) CommitAllIn(dir, message string) error {
+	if f.Err != nil {
+		return f.Err
+	}
+	f.Commits = append(f.Commits, message)
+	return nil
+}
+
+func (f *FakeGitClient) ShowFileAtRef(ref, filePath string) ([]byte, error) {
+	if f.Err != nil {
+		return nil, f.Err
+	}
+	key := ref + ":" + filePath
+	content, ok := f.BaseFiles[key]
+	if !ok {
+		return nil, fmt.Errorf("path %q not found at ref %q", filePath, ref)
+	}
+	return []byte(content), nil
+}
+
+func (f *FakeGitClient) UpdateBranchRef(branch, dir string) error {
+	if f.Err != nil {
+		return f.Err
+	}
 	return nil
 }
 

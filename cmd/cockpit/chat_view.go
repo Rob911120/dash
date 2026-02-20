@@ -35,50 +35,63 @@ func (m *chatModel) renderMessages(width int) string {
 	}
 
 	var content strings.Builder
-	for i, msg := range m.messages {
-		switch msg.Role {
-		case "system-marker":
-			content.WriteString(textDim.Render("  \u2500\u2500 "+msg.Content+" \u2500\u2500") + "\n")
-		case "control-briefing":
-			box := controlBriefingBox.Width(boxWidth).Render(msg.Content)
-			for _, line := range strings.Split(box, "\n") {
-				content.WriteString("  " + line + "\n")
+	for _, entry := range m.renderLog {
+		if entry.IsUI {
+			if entry.Idx >= len(m.uiMessages) {
+				continue
 			}
-		case "control-release":
-			content.WriteString(textCyan.Render("  ── "+msg.Content+" ──") + "\n")
-		case "user":
-			content.WriteString(chatUser.Render("  > "))
-			content.WriteString(chatUser.Render(wrapText(msg.Content, contentWidth)))
-			content.WriteString("\n")
-		case "assistant":
-			if m.showReasoning && msg.Reasoning != "" {
-				wrapped := wrapText(msg.Reasoning, contentWidth-4)
-				content.WriteString("  " + reasoningBlock.Render(wrapped) + "\n")
+			ui := m.uiMessages[entry.Idx]
+			switch ui.Kind {
+			case "system-marker":
+				content.WriteString(textDim.Render("  \u2500\u2500 "+ui.Content+" \u2500\u2500") + "\n")
+			case "control-briefing":
+				box := controlBriefingBox.Width(boxWidth).Render(ui.Content)
+				for _, line := range strings.Split(box, "\n") {
+					content.WriteString("  " + line + "\n")
+				}
+			case "control-release":
+				content.WriteString(textCyan.Render("  ── "+ui.Content+" ──") + "\n")
 			}
-			if msg.Content != "" {
-				content.WriteString("  ")
-				content.WriteString(wrapText(msg.Content, contentWidth))
+		} else {
+			if entry.Idx >= len(m.messages) {
+				continue
+			}
+			msg := m.messages[entry.Idx]
+			switch msg.Role {
+			case "user":
+				content.WriteString(chatUser.Render("  > "))
+				content.WriteString(chatUser.Render(wrapText(msg.Content, contentWidth)))
 				content.WriteString("\n")
-			}
+			case "assistant":
+				if m.showReasoning && msg.Reasoning != "" {
+					wrapped := wrapText(msg.Reasoning, contentWidth-4)
+					content.WriteString("  " + reasoningBlock.Render(wrapped) + "\n")
+				}
+				if msg.Content != "" {
+					content.WriteString("  ")
+					content.WriteString(wrapText(msg.Content, contentWidth))
+					content.WriteString("\n")
+				}
 
-			// Collapse completed tool calls for older messages when toolsCollapsed is true
-			isLastAssistant := i == lastAssistantIdx
-			for _, tc := range msg.ToolCalls {
-				if result, ok := toolResults[tc.ID]; ok {
-					if m.toolsCollapsed && !isLastAssistant {
-						// Collapsed: one-line badge
-						content.WriteString("  " + renderToolBadge(tc, result, boxWidth) + "\n")
+				// Collapse completed tool calls for older messages when toolsCollapsed is true
+				isLastAssistant := entry.Idx == lastAssistantIdx
+				for _, tc := range msg.ToolCalls {
+					if result, ok := toolResults[tc.ID]; ok {
+						if m.toolsCollapsed && !isLastAssistant {
+							// Collapsed: one-line badge
+							content.WriteString("  " + renderToolBadge(tc, result, boxWidth) + "\n")
+						} else {
+							box := renderToolBox(tc, result, boxWidth)
+							for _, line := range strings.Split(box, "\n") {
+								content.WriteString("  " + line + "\n")
+							}
+						}
 					} else {
-						box := renderToolBox(tc, result, boxWidth)
+						// Pending: always expanded
+						box := renderToolBoxPending(tc, boxWidth)
 						for _, line := range strings.Split(box, "\n") {
 							content.WriteString("  " + line + "\n")
 						}
-					}
-				} else {
-					// Pending: always expanded
-					box := renderToolBoxPending(tc, boxWidth)
-					for _, line := range strings.Split(box, "\n") {
-						content.WriteString("  " + line + "\n")
 					}
 				}
 			}

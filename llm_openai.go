@@ -165,14 +165,17 @@ type openAIChatResponse struct {
 }
 
 func translateToOpenAI(messages []ChatMessage) []openAIMessage {
-	out := make([]openAIMessage, len(messages))
-	for i, m := range messages {
-		out[i] = openAIMessage{
+	var out []openAIMessage
+	for _, m := range messages {
+		if !ValidRoles[m.Role] {
+			continue // skip non-API roles (safety net)
+		}
+		out = append(out, openAIMessage{
 			Role:       m.Role,
 			Content:    m.Content,
 			ToolCalls:  m.ToolCalls,
 			ToolCallID: m.ToolCallID,
-		}
+		})
 	}
 	return out
 }

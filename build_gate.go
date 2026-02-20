@@ -2,7 +2,9 @@ package dash
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -27,19 +29,26 @@ type BuildGateResult struct {
 
 // RunBuildGate executes the full build gate in an isolated worktree.
 // It checks scope, AST policy, build, and test — all in a clean worktree.
-// The worktree is cleaned up even on panic via defer.
-func RunBuildGate(git GitClient, wo *WorkOrder) (*BuildGateResult, error) {
+//
+// If wtPath is non-empty the caller owns the worktree lifecycle; RunBuildGate
+// will use it as-is and will NOT clean it up.  If wtPath is empty, RunBuildGate
+// creates its own worktree and removes it on return (standalone mode).
+func RunBuildGate(git GitClient, wo *WorkOrder, wtPath string) (*BuildGateResult, error) {
 	if wo.BranchName == "" {
 		return nil, fmt.Errorf("work order has no branch name")
 	}
 
-	wtPath := fmt.Sprintf("/tmp/dash-wo/%s", wo.Node.ID)
-
-	// Create worktree
-	if err := git.AddWorktree(wtPath, wo.BranchName); err != nil {
-		return nil, fmt.Errorf("add worktree: %w", err)
+	ownWorktree := false
+	if wtPath == "" {
+		wtPath = fmt.Sprintf("/tmp/dash-wo/%s", wo.Node.ID)
+		if err := git.AddWorktree(wtPath, wo.BranchName); err != nil {
+			return nil, fmt.Errorf("add worktree: %w", err)
+		}
+		ownWorktree = true
 	}
-	defer git.RemoveWorktree(wtPath) // bombproof cleanup
+	if ownWorktree {
+		defer git.RemoveWorktree(wtPath)
+	}
 
 	result := &BuildGateResult{
 		WorktreeAt: wtPath,
@@ -61,32 +70,34 @@ func RunBuildGate(git GitClient, wo *WorkOrder) (*BuildGateResult, error) {
 		return result, nil // fail fast
 	}
 
-	// 3. AST validation (in worktree context)
+	// 3. AST validation — compare base branch files against worktree (new)
 	policy := DefaultASTPolicy()
 	policy.AllowPublicAPIChange = wo.AllowPublicAPIChange
 
-	// For AST validation we need the base and new paths.
-	// In a worktree, the files represent the "new" state.
-	// We compare against the base branch's state.
-	// For now, validate that changed .go files parse correctly.
-	// Full AST comparison requires checking out the base branch too,
-	// which we do by comparing the worktree (new) against repo root (base).
-	repoRoot := wo.RepoRoot
-	if repoRoot == "" {
-		repoRoot = "." // fallback
-	}
-	astResult, err := ValidateAppendOnly(repoRoot, wtPath, policy, wo.ScopePaths)
-	if err != nil {
-		// AST parse error is not a gate failure, log it
-		result.AST = ASTValidationResult{
-			Passed: false,
-			Violations: []ASTViolation{{
-				Kind:   "parse_error",
-				Detail: err.Error(),
-			}},
+	baseTmpDir, cleanup, extractErr := extractBaseFiles(git, wo.BaseBranch, changedFiles)
+	if extractErr == nil {
+		defer cleanup()
+		astResult, err := ValidateAppendOnly(baseTmpDir, wtPath, policy, wo.ScopePaths)
+		if err != nil {
+			result.AST = ASTValidationResult{
+				Passed: false,
+				Violations: []ASTViolation{{
+					Kind:   "parse_error",
+					Detail: err.Error(),
+				}},
+			}
+		} else {
+			result.AST = *astResult
 		}
 	} else {
-		result.AST = *astResult
+		// Fallback: if we can't extract base files, skip AST validation with a warning
+		result.AST = ASTValidationResult{
+			Passed: true,
+			Violations: []ASTViolation{{
+				Kind:   "warning",
+				Detail: fmt.Sprintf("could not extract base files for AST comparison: %v", extractErr),
+			}},
+		}
 	}
 	if !result.AST.Passed {
 		return result, nil // fail fast
@@ -121,6 +132,39 @@ func RunBuildGate(git GitClient, wo *WorkOrder) (*BuildGateResult, error) {
 	result.Passed = result.Scope.Passed && result.AST.Passed && result.Build.Passed && result.Test.Passed
 
 	return result, nil
+}
+
+// extractBaseFiles uses git show to reconstruct changed .go files at their
+// base-branch state into a temporary directory.  Returns the temp dir path,
+// a cleanup func, and an error.  Files that don't exist on base (new files)
+// are silently skipped.
+func extractBaseFiles(git GitClient, baseBranch string, changedFiles []string) (string, func(), error) {
+	tmpDir, err := os.MkdirTemp("", "dash-ast-base-")
+	if err != nil {
+		return "", nil, fmt.Errorf("create temp dir: %w", err)
+	}
+	cleanup := func() { os.RemoveAll(tmpDir) }
+
+	for _, f := range changedFiles {
+		if !strings.HasSuffix(f, ".go") {
+			continue
+		}
+		content, err := git.ShowFileAtRef(baseBranch, f)
+		if err != nil {
+			// File doesn't exist on base branch → new file, skip
+			continue
+		}
+		dest := filepath.Join(tmpDir, f)
+		if err := os.MkdirAll(filepath.Dir(dest), 0755); err != nil {
+			cleanup()
+			return "", nil, fmt.Errorf("mkdir for %s: %w", f, err)
+		}
+		if err := os.WriteFile(dest, content, 0644); err != nil {
+			cleanup()
+			return "", nil, fmt.Errorf("write %s: %w", f, err)
+		}
+	}
+	return tmpDir, cleanup, nil
 }
 
 // captureGoEnv captures key Go environment variables for reproducibility.

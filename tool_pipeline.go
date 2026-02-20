@@ -79,7 +79,7 @@ func handlePipeline(ctx context.Context, d *Dash, args map[string]any) (any, err
 			return nil, fmt.Errorf("work order must be in build_passed state for synthesis, currently %s", wo.Status)
 		}
 		git := NewExecGitClient(wo.RepoRoot)
-		result, err := d.RunSynthesisPipeline(ctx, woID, git)
+		result, err := d.RunSynthesisPipeline(ctx, woID, git, "")
 		if err != nil {
 			return nil, err
 		}

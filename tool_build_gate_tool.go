@@ -46,7 +46,7 @@ func handleBuildGateTool(ctx context.Context, d *Dash, args map[string]any) (any
 	}
 
 	git := NewExecGitClient(wo.RepoRoot)
-	result, err := RunBuildGate(git, wo)
+	result, err := RunBuildGate(git, wo, "")
 	if err != nil {
 		return nil, fmt.Errorf("build gate error: %w", err)
 	}

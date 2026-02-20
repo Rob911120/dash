@@ -246,10 +246,11 @@ func resumeAfterHandoff(d *dash.Dash, tab *agentTab, chatCl *chatClient) tea.Cmd
 		}
 
 		// Reset the chat but keep the system prompt context
-		tab.chat.messages = []chatMessage{
-			{Role: "system", Content: text},
-			{Role: "user", Content: "Handoff: du har nått token-gränsen. Här är sammanfattningen av ditt arbete hittills. Fortsätt med missionen."},
-		}
+		tab.chat.messages = nil
+		tab.chat.uiMessages = nil
+		tab.chat.renderLog = nil
+		tab.chat.appendMsg(dash.ChatMessage{Role: "system", Content: text})
+		tab.chat.appendMsg(dash.ChatMessage{Role: "user", Content: "Handoff: du har nått token-gränsen. Här är sammanfattningen av ditt arbete hittills. Fortsätt med missionen."})
 		tab.meter = newTokenMeter(tab.meter.limit)
 		tab.status = agentActive
 

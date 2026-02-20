@@ -347,7 +347,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 
 					if tab.pendingMessage != "" {
-						tab.chat.messages = append(tab.chat.messages, chatMessage{
+						tab.chat.appendMsg(dash.ChatMessage{
 							Role: "user", Content: tab.pendingMessage,
 						})
 						tab.pendingMessage = ""
@@ -421,9 +421,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Inject briefing into the right agent tab
 		for _, tab := range m.agents.tabs {
 			if tab.agentKey == msg.agentKey {
-				tab.chat.messages = append(tab.chat.messages, chatMessage{
-					Role: "control-briefing", Content: msg.briefing,
-				})
+				tab.chat.appendUI("control-briefing", msg.briefing)
 				tab.chat.scrollToBottom()
 				break
 			}
@@ -437,9 +435,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			for _, tab := range m.agents.tabs {
 				if tab.agentKey == msg.agentKey {
-					tab.chat.messages = append(tab.chat.messages, chatMessage{
-						Role: "control-release", Content: "⏸ Agent pausad",
-					})
+					tab.chat.appendUI("control-release", "⏸ Agent pausad")
 					tab.chat.scrollToBottom()
 					// Stop any active stream
 					if tab.chat.cancelFn != nil {
@@ -491,17 +487,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.activeStreamOwner != "" {
 			for _, tab := range m.agents.tabs {
 				if tab.agentKey == m.activeStreamOwner {
-					tab.chat.messages = append(tab.chat.messages, msg.results...)
-					tab.chat.toolStatus = ""
-					tab.chat.scrollToBottom()
+					if !tab.chat.handleToolResults(msg.results) {
+						m.activeStreamOwner = ""
+						return m, nil
+					}
 					return m, m.beginStream(tab.agentKey, tab.chat)
 				}
 			}
 		}
 		oc := m.orchChat()
-		oc.messages = append(oc.messages, msg.results...)
-		oc.toolStatus = ""
-		oc.scrollToBottom()
+		if !oc.handleToolResults(msg.results) {
+			m.activeStreamOwner = ""
+			return m, nil
+		}
 		return m, m.beginStream("orchestrator", oc)
 
 	case chatToolResultWithAsk:
@@ -516,7 +514,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case chatToolResultWithSpawn:
 		// Feed tool results back to orchestrator chat
 		oc := m.orchChat()
-		oc.messages = append(oc.messages, msg.results...)
+		oc.appendMsgs(msg.results)
 		oc.toolStatus = ""
 		oc.scrollToBottom()
 
@@ -791,7 +789,7 @@ func (m *model) spawnAgentTab(info agentSpawnInfo) {
 	tab.status = agentActive
 
 	// Auto-start: inject mission as first user message
-	tab.chat.messages = append(tab.chat.messages, chatMessage{
+	tab.chat.appendMsg(dash.ChatMessage{
 		Role:    "user",
 		Content: info.Mission,
 	})
@@ -805,7 +803,7 @@ func (m *model) handleOverlayAction(action string) tea.Cmd {
 	case strings.HasPrefix(action, "task:"):
 		taskName := strings.TrimPrefix(action, "task:")
 		oc := m.orchChat()
-		oc.messages = append(oc.messages, chatMessage{Role: "user", Content: "Arbeta med task: " + taskName})
+		oc.appendMsg(dash.ChatMessage{Role: "user", Content: "Arbeta med task: " + taskName})
 		// Switch to orchestrator tab
 		for i, tab := range m.agents.tabs {
 			if tab.agentKey == "orchestrator" {
@@ -819,7 +817,7 @@ func (m *model) handleOverlayAction(action string) tea.Cmd {
 	case strings.HasPrefix(action, "plan:"):
 		planName := strings.TrimPrefix(action, "plan:")
 		oc := m.orchChat()
-		oc.messages = append(oc.messages, chatMessage{Role: "user", Content: "Kör plan: " + planName})
+		oc.appendMsg(dash.ChatMessage{Role: "user", Content: "Kör plan: " + planName})
 		// Switch to orchestrator tab
 		for i, tab := range m.agents.tabs {
 			if tab.agentKey == "orchestrator" {
@@ -936,7 +934,7 @@ func (m *model) handlePlanRequest(msg chatToolResultWithPlanRequest) (tea.Model,
 	// 1. Feed tool results back to caller's chat (NOT blocked — fire-and-forget)
 	callerChat := m.activeStreamChat()
 	if callerChat != nil {
-		callerChat.messages = append(callerChat.messages, msg.results...)
+		callerChat.appendMsgs(msg.results)
 		callerChat.toolStatus = ""
 		callerChat.scrollToBottom()
 	}
@@ -952,7 +950,7 @@ func (m *model) handlePlanRequest(msg chatToolResultWithPlanRequest) (tea.Model,
 	if msg.priority != "" {
 		reqMsg += fmt.Sprintf("\nPrioritet: %s", msg.priority)
 	}
-	plannerTab.chat.messages = append(plannerTab.chat.messages, chatMessage{
+	plannerTab.chat.appendMsg(dash.ChatMessage{
 		Role:    "user",
 		Content: reqMsg,
 	})
@@ -985,7 +983,7 @@ func (m *model) handleAskDispatch(msg chatToolResultWithAsk) (tea.Model, tea.Cmd
 	// 1. Feed tool results into caller's chat but do NOT restart stream
 	callerChat := m.chatForAgent(q.callerKey)
 	if callerChat != nil {
-		callerChat.messages = append(callerChat.messages, msg.results...)
+		callerChat.appendMsgs(msg.results)
 		callerChat.toolStatus = fmt.Sprintf("waiting for %s...", q.targetKey)
 		callerChat.scrollToBottom()
 	}
@@ -1021,7 +1019,7 @@ func (m *model) handleAskDispatch(msg chatToolResultWithAsk) (tea.Model, tea.Cmd
 
 	// 5. Inject question as user message with system marker
 	marker := fmt.Sprintf("── FRÅGA FRÅN %s (query_id: %s) ──\n%s", q.callerKey, q.id, q.question)
-	targetTab.chat.messages = append(targetTab.chat.messages, chatMessage{
+	targetTab.chat.appendMsg(dash.ChatMessage{
 		Role:    "user",
 		Content: marker,
 	})
@@ -1044,7 +1042,7 @@ func (m *model) handleAnswerRoute(msg chatToolResultWithAnswer) (tea.Model, tea.
 	// 1. Feed tool results into target's chat
 	targetChat := m.activeStreamChat()
 	if targetChat != nil {
-		targetChat.messages = append(targetChat.messages, msg.results...)
+		targetChat.appendMsgs(msg.results)
 		targetChat.toolStatus = ""
 		targetChat.scrollToBottom()
 	}

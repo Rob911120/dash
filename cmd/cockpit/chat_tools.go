@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 
 	"dash"
 
@@ -48,7 +47,7 @@ func (m *chatModel) executeTools(calls []streamToolCall) tea.Cmd {
 	callerKey := m.scopedAgent
 	return func() tea.Msg {
 		ctx := context.Background()
-		var toolResults []chatMessage
+		var toolResults []dash.ChatMessage
 		var spawnInfo *agentSpawnInfo
 		var askQuery *pendingQuery
 		var planReqInfo *planRequestInfo
@@ -59,16 +58,12 @@ func (m *chatModel) executeTools(calls []streamToolCall) tea.Cmd {
 				args = map[string]any{}
 			}
 
-			var resultText string
 			if d != nil {
 				// Self-ask guard
 				if c.Name == "ask_agent" {
 					target, _ := args["target"].(string)
 					if target == callerKey {
-						resultText = `{"error": "cannot ask yourself"}`
-						toolResults = append(toolResults, chatMessage{
-							Role: "tool", Name: c.Name, Content: resultText, ToolCallID: c.ID,
-						})
+						toolResults = append(toolResults, dash.NewToolResult(c.ID, c.Name, `{"error": "cannot ask yourself"}`, true))
 						continue
 					}
 				}
@@ -79,7 +74,7 @@ func (m *chatModel) executeTools(calls []streamToolCall) tea.Cmd {
 				})
 				if result.Success {
 					resultJSON, _ := json.Marshal(result.Data)
-					resultText = string(resultJSON)
+					resultText := string(resultJSON)
 
 					// Detect spawn_agent results
 					if c.Name == "spawn_agent" {
@@ -108,23 +103,21 @@ func (m *chatModel) executeTools(calls []streamToolCall) tea.Cmd {
 						answerRaw, _ := args["answer"].(string)
 						answerText = answerRaw
 					}
+
+					if len(resultText) > 4000 {
+						resultText = resultText[:4000] + "\n... (truncated)"
+					}
+					toolResults = append(toolResults, dash.NewToolResult(c.ID, c.Name, resultText, false))
 				} else {
-					resultText = fmt.Sprintf("Error: %s", result.Error)
+					errText := result.Error
+					if len(errText) > 4000 {
+						errText = errText[:4000] + "\n... (truncated)"
+					}
+					toolResults = append(toolResults, dash.NewToolResult(c.ID, c.Name, errText, true))
 				}
 			} else {
-				resultText = "Error: Dash client not available"
+				toolResults = append(toolResults, dash.NewToolResult(c.ID, c.Name, "Dash client not available", true))
 			}
-
-			if len(resultText) > 4000 {
-				resultText = resultText[:4000] + "\n... (truncated)"
-			}
-
-			toolResults = append(toolResults, chatMessage{
-				Role:       "tool",
-				Name:       c.Name,
-				Content:    resultText,
-				ToolCallID: c.ID,
-			})
 		}
 
 		// Priority: answer > ask > planRequest > spawn > normal

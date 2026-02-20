@@ -22,7 +22,7 @@ var toolIcon = map[string]string{
 }
 
 // renderToolBadge renders a tool call as a compact one-line badge: [✔] icon name(args) - summary
-func renderToolBadge(tc toolCall, result string, maxWidth int) string {
+func renderToolBadge(tc dash.ToolCallRef, result string, maxWidth int) string {
 	icon := toolIcon[tc.Function.Name]
 	if icon == "" {
 		icon = "\u2022"
@@ -51,7 +51,7 @@ func renderToolBadge(tc toolCall, result string, maxWidth int) string {
 	return status + " " + toolBoxDim.Render(truncate(badge, maxWidth-5))
 }
 
-func renderToolBox(tc toolCall, result string, boxWidth int) string {
+func renderToolBox(tc dash.ToolCallRef, result string, boxWidth int) string {
 	innerWidth := boxWidth - 4
 	if innerWidth < 20 {
 		innerWidth = 20
@@ -78,7 +78,7 @@ func renderToolBox(tc toolCall, result string, boxWidth int) string {
 	return toolBox.Width(innerWidth).Render(content)
 }
 
-func renderToolBoxPending(tc toolCall, boxWidth int) string {
+func renderToolBoxPending(tc dash.ToolCallRef, boxWidth int) string {
 	innerWidth := boxWidth - 4
 	if innerWidth < 20 {
 		innerWidth = 20

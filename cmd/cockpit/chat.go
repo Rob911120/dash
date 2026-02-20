@@ -15,11 +15,25 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
+// uiMessage holds TUI-internal messages that must not be sent to LLM APIs.
+type uiMessage struct {
+	Kind    string // "system-marker", "control-briefing", "control-release"
+	Content string
+}
+
+// renderEntry tracks interleaving order of messages and uiMessages for TUI rendering.
+type renderEntry struct {
+	IsUI bool // true = uiMessages[Idx], false = messages[Idx]
+	Idx  int
+}
+
 type chatModel struct {
 	client    *chatClient
 	d         *dash.Dash
 	sessionID string
-	messages  []chatMessage
+	messages   []dash.ChatMessage // Only valid API roles (user/assistant/tool/system)
+	uiMessages []uiMessage       // TUI-internal markers, briefings
+	renderLog  []renderEntry     // Interleaving order for TUI rendering
 	input     []rune
 	cursorPos int
 
@@ -34,12 +48,13 @@ type chatModel struct {
 	width        int
 	height       int
 
-	errMsg         string
-	toolStatus     string
-	toolIter       int // counts consecutive tool call rounds
-	maxToolIter    int // 0 = unlimited, default 5
-	showReasoning  bool
-	toolsCollapsed bool
+	errMsg              string
+	toolStatus          string
+	toolIter            int // counts consecutive tool call rounds
+	maxToolIter         int // 0 = unlimited, default 20
+	consecutiveFailures int // counts rounds where ALL tool calls failed
+	showReasoning       bool
+	toolsCollapsed      bool
 
 	scopedAgent  string
 	agentMission string
@@ -56,15 +71,77 @@ type chatModel struct {
 
 // chatToolResultReady is sent when tool execution completes.
 type chatToolResultReady struct {
-	results []chatMessage
+	results []dash.ChatMessage
 	calls   []streamToolCall
 }
 
 // chatToolResultWithSpawn is sent when tool execution includes a spawn_agent result.
 type chatToolResultWithSpawn struct {
-	results []chatMessage
+	results []dash.ChatMessage
 	calls   []streamToolCall
 	spawn   agentSpawnInfo
+}
+
+// appendMsg adds an API message and tracks it in the render log.
+func (m *chatModel) appendMsg(msg dash.ChatMessage) {
+	m.messages = append(m.messages, msg)
+	m.renderLog = append(m.renderLog, renderEntry{IsUI: false, Idx: len(m.messages) - 1})
+}
+
+// appendMsgs adds multiple API messages and tracks them in the render log.
+func (m *chatModel) appendMsgs(msgs []dash.ChatMessage) {
+	for _, msg := range msgs {
+		m.appendMsg(msg)
+	}
+}
+
+// appendUI adds a UI message and tracks it in the render log.
+func (m *chatModel) appendUI(kind, content string) {
+	m.uiMessages = append(m.uiMessages, uiMessage{Kind: kind, Content: content})
+	m.renderLog = append(m.renderLog, renderEntry{IsUI: true, Idx: len(m.uiMessages) - 1})
+}
+
+const maxConsecutiveFailures = 3
+
+// handleToolResults appends tool results and counts consecutive failures.
+// Returns true if the agent should continue (stream next turn), false if stopped.
+func (m *chatModel) handleToolResults(results []dash.ChatMessage) bool {
+	m.appendMsgs(results)
+	m.toolStatus = ""
+	m.scrollToBottom()
+
+	// Count failures in this batch
+	failCount := 0
+	for _, r := range results {
+		if r.ToolError {
+			failCount++
+		}
+	}
+	if failCount == len(results) && len(results) > 0 {
+		m.consecutiveFailures++
+	} else {
+		m.consecutiveFailures = 0
+	}
+
+	if m.consecutiveFailures >= maxConsecutiveFailures {
+		// Strip tool calls from last assistant to avoid orphaned tool_calls
+		if len(m.messages) > 0 {
+			for i := len(m.messages) - 1; i >= 0; i-- {
+				if m.messages[i].Role == "assistant" {
+					m.messages[i].ToolCalls = nil
+					if m.messages[i].Content == "" {
+						m.messages[i].Content = "[Stoppade — alla tool calls misslyckades 3 gånger i rad]"
+					}
+					break
+				}
+			}
+		}
+		m.errMsg = "Stoppade: alla tool calls misslyckades 3 iterationer i rad"
+		m.consecutiveFailures = 0
+		m.toolIter = 0
+		return false
+	}
+	return true
 }
 
 func newChatModel(client *chatClient, d *dash.Dash, sessionID string) *chatModel {
@@ -78,7 +155,7 @@ func newChatModel(client *chatClient, d *dash.Dash, sessionID string) *chatModel
 	h.Styles.ShortKey = textDim
 	h.Styles.ShortDesc = textDim
 	h.Styles.ShortSeparator = textDim
-	return &chatModel{client: client, d: d, sessionID: sessionID, maxToolIter: 0, viewport: vp, thinkSpinner: sp, helpModel: h, keyMap: newChatKeyMap()}
+	return &chatModel{client: client, d: d, sessionID: sessionID, maxToolIter: 20, viewport: vp, thinkSpinner: sp, helpModel: h, keyMap: newChatKeyMap()}
 }
 
 func (m *chatModel) Update(msg tea.Msg, width, height int) tea.Cmd {
@@ -134,25 +211,25 @@ func (m *chatModel) Update(msg tea.Msg, width, height int) tea.Cmd {
 			m.cancelFn = nil
 		}
 
-		var tcs []toolCall
+		var tcs []dash.ToolCallRef
 		for _, c := range msg.calls {
-			tcs = append(tcs, toolCall{
+			tcs = append(tcs, dash.ToolCallRef{
 				ID:   c.ID,
 				Type: "function",
-				Function: toolFunction{
+				Function: dash.ToolCallFunc{
 					Name:      c.Name,
 					Arguments: c.ArgsBuf.String(),
 				},
 			})
 		}
 
-		assistantMsg := chatMessage{
+		assistantMsg := dash.ChatMessage{
 			Role:      "assistant",
 			Content:   m.streamBuf,
 			ToolCalls: tcs,
 			Reasoning: m.reasoningBuf,
 		}
-		m.messages = append(m.messages, assistantMsg)
+		m.appendMsg(assistantMsg)
 		m.storeReasoning(m.reasoningBuf, m.streamBuf)
 		m.streamBuf = ""
 		m.reasoningBuf = ""
@@ -184,8 +261,8 @@ func (m *chatModel) Update(msg tea.Msg, width, height int) tea.Cmd {
 			m.streaming = false
 			m.toolStatus = ""
 			if m.streamBuf != "" {
-				assistantMsg := chatMessage{Role: "assistant", Content: m.streamBuf, Reasoning: m.reasoningBuf}
-				m.messages = append(m.messages, assistantMsg)
+				assistantMsg := dash.ChatMessage{Role: "assistant", Content: m.streamBuf, Reasoning: m.reasoningBuf}
+				m.appendMsg(assistantMsg)
 				m.storeReasoning(m.reasoningBuf, m.streamBuf)
 				m.meter.addExchange()
 			} else if m.reasoningBuf == "" {
@@ -217,7 +294,7 @@ func (m *chatModel) Update(msg tea.Msg, width, height int) tea.Cmd {
 		m.toolStatus = ""
 		m.errMsg = msg.err.Error()
 		if m.streamBuf != "" {
-			m.messages = append(m.messages, chatMessage{Role: "assistant", Content: m.streamBuf, Reasoning: m.reasoningBuf})
+			m.appendMsg(dash.ChatMessage{Role: "assistant", Content: m.streamBuf, Reasoning: m.reasoningBuf})
 			m.streamBuf = ""
 			m.reasoningBuf = ""
 		}
@@ -302,6 +379,8 @@ func (m *chatModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.cursorPos += len(runes)
 	case ActionClearChat:
 		m.messages = nil
+		m.uiMessages = nil
+		m.renderLog = nil
 		m.errMsg = ""
 		m.viewport.GotoTop()
 	}
@@ -318,7 +397,7 @@ func (m *chatModel) sendMessage() tea.Cmd {
 	m.errMsg = ""
 	m.toolIter = 0
 	m.scrollToBottom()
-	m.messages = append(m.messages, chatMessage{Role: "user", Content: text})
+	m.appendMsg(dash.ChatMessage{Role: "user", Content: text})
 	return m.startStream()
 }
 
@@ -329,7 +408,7 @@ func (m *chatModel) startStream() tea.Cmd {
 	} else {
 		sysPrompt = m.continuationPrompt() // Kort nudge (~100 chars)
 	}
-	apiMsgs := []chatMessage{{Role: "system", Content: sysPrompt}}
+	apiMsgs := []dash.ChatMessage{{Role: "system", Content: sysPrompt}}
 
 	// Compress old tool results to save context
 	apiMsgs = append(apiMsgs, m.compressedConversationMessages()...)
@@ -409,10 +488,7 @@ func (m *chatModel) switchModel() tea.Cmd {
 	}
 	oldModel := m.client.model
 	newModel := m.client.cycleModel()
-	m.messages = append(m.messages, chatMessage{
-		Role:    "system-marker",
-		Content: "\u2192 " + newModel,
-	})
+	m.appendUI("system-marker", "\u2192 "+newModel)
 	m.scrollToBottom()
 	m.logModelSwitch(oldModel, newModel)
 	return nil
@@ -424,10 +500,7 @@ func (m *chatModel) switchModelBack() tea.Cmd {
 	}
 	oldModel := m.client.model
 	newModel := m.client.cycleModelBack()
-	m.messages = append(m.messages, chatMessage{
-		Role:    "system-marker",
-		Content: "\u2192 " + newModel,
-	})
+	m.appendUI("system-marker", "\u2192 "+newModel)
 	m.scrollToBottom()
 	m.logModelSwitch(oldModel, newModel)
 	return nil
@@ -492,11 +565,8 @@ func (m *chatModel) cycleToolLimit() {
 	}
 }
 
-// addSystemMessage adds a system message to the chat (e.g., from observation agent)
+// addSystemMessage adds a UI message to the chat (e.g., from observation agent)
 func (m *chatModel) addSystemMessage(content string) {
-	m.messages = append(m.messages, chatMessage{
-		Role:    "system-marker",
-		Content: content,
-	})
+	m.appendUI("system-marker", content)
 	m.scrollToBottom()
 }

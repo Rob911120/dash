@@ -44,9 +44,25 @@ func (d *Dash) PrepareWorkOrderBranch(ctx context.Context, woID uuid.UUID, git G
 	return err
 }
 
+// ResetWorkOrderBranch checks out the base branch for a work order (cleanup after pipeline).
+func (d *Dash) ResetWorkOrderBranch(ctx context.Context, woID uuid.UUID, git GitClient) error {
+	wo, err := d.GetWorkOrder(ctx, woID)
+	if err != nil {
+		return err
+	}
+	base := wo.BaseBranch
+	if base == "" {
+		base = "main"
+	}
+	return git.CheckoutBranch(base)
+}
+
 // RunFullPipeline executes the complete pipeline: build gate → synthesis → merge.
 // It assumes the work order is in mutating state and the agent has committed changes.
+// A single worktree is created and shared across both build gate and synthesis stages.
 func (d *Dash) RunFullPipeline(ctx context.Context, woID uuid.UUID, git GitClient) (*PipelineResult, error) {
+	defer d.ResetWorkOrderBranch(ctx, woID, git)
+
 	wo, err := d.GetWorkOrder(ctx, woID)
 	if err != nil {
 		return nil, fmt.Errorf("get work order: %w", err)
@@ -54,8 +70,16 @@ func (d *Dash) RunFullPipeline(ctx context.Context, woID uuid.UUID, git GitClien
 
 	result := &PipelineResult{Stage: "build_gate"}
 
-	// 1. Build gate
-	gateResult, err := RunBuildGate(git, wo)
+	// Create a single worktree for the entire pipeline
+	wtPath := fmt.Sprintf("/tmp/dash-wo/%s", wo.Node.ID)
+	if err := git.AddWorktree(wtPath, wo.BranchName); err != nil {
+		result.Error = err.Error()
+		return result, fmt.Errorf("add worktree: %w", err)
+	}
+	defer git.RemoveWorktree(wtPath)
+
+	// 1. Build gate (reuse worktree)
+	gateResult, err := RunBuildGate(git, wo, wtPath)
 	if err != nil {
 		result.Error = err.Error()
 		return result, err
@@ -71,8 +95,8 @@ func (d *Dash) RunFullPipeline(ctx context.Context, woID uuid.UUID, git GitClien
 	d.AdvanceWorkOrder(ctx, woID, WOStatusBuildPassed, "pipeline", "build gate passed")
 	result.Stage = "synthesis"
 
-	// 2. Synthesis
-	synthResult, err := d.RunSynthesisPipeline(ctx, woID, git)
+	// 2. Synthesis (reuse worktree)
+	synthResult, err := d.RunSynthesisPipeline(ctx, woID, git, wtPath)
 	if err != nil {
 		result.Error = err.Error()
 		return result, err

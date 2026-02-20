@@ -9,19 +9,15 @@ import (
 	"dash"
 )
 
-// conversationMessages returns all non-system-marker messages.
-func (m *chatModel) conversationMessages() []chatMessage {
-	var msgs []chatMessage
-	for _, msg := range m.messages {
-		if msg.Role != "system-marker" {
-			msgs = append(msgs, msg)
-		}
-	}
-	return msgs
+// conversationMessages returns all messages (already clean — only valid API roles).
+func (m *chatModel) conversationMessages() []dash.ChatMessage {
+	out := make([]dash.ChatMessage, len(m.messages))
+	copy(out, m.messages)
+	return out
 }
 
 // compressedConversationMessages returns conversation messages with old tool results compressed.
-func (m *chatModel) compressedConversationMessages() []chatMessage {
+func (m *chatModel) compressedConversationMessages() []dash.ChatMessage {
 	msgs := m.conversationMessages()
 	if len(msgs) <= 6 {
 		return msgs
@@ -37,12 +33,12 @@ func (m *chatModel) compressedConversationMessages() []chatMessage {
 		protectFrom = i
 	}
 
-	result := make([]chatMessage, len(msgs))
+	result := make([]dash.ChatMessage, len(msgs))
 	copy(result, msgs)
 
 	for i := 0; i < protectFrom; i++ {
 		if result[i].Role == "tool" && len(result[i].Content) > 300 {
-			result[i] = chatMessage{
+			result[i] = dash.ChatMessage{
 				Role:       "tool",
 				Name:       result[i].Name,
 				Content:    summarizeToolResult(result[i].Name, result[i].Content),
@@ -56,13 +52,16 @@ func (m *chatModel) compressedConversationMessages() []chatMessage {
 // clearAndContinue summarizes the conversation and resets for a fresh context window.
 func (m *chatModel) clearAndContinue() {
 	summary := buildConversationSummary(m.conversationMessages())
-	m.messages = []chatMessage{
-		{Role: "system-marker", Content: "--- session rotated ---"},
-		{Role: "user", Content: "[Sammanfattning av session]\n" + summary},
-		{Role: "assistant", Content: "Förstått. Jag fortsätter med denna kontext."},
-	}
+	// Reset all slices, then rebuild in correct order
+	m.messages = nil
+	m.uiMessages = nil
+	m.renderLog = nil
+	m.appendUI("system-marker", "--- session rotated ---")
+	m.appendMsg(dash.ChatMessage{Role: "user", Content: "[Sammanfattning av session]\n" + summary})
+	m.appendMsg(dash.ChatMessage{Role: "assistant", Content: "Förstått. Jag fortsätter med denna kontext."})
 	m.meter = newTokenMeter(m.meter.limit)
 	m.toolIter = 0
+	m.consecutiveFailures = 0
 	m.errMsg = ""
 	m.toolStatus = ""
 	m.streamBuf = ""
@@ -70,7 +69,7 @@ func (m *chatModel) clearAndContinue() {
 }
 
 // buildConversationSummary creates a compact summary of messages.
-func buildConversationSummary(msgs []chatMessage) string {
+func buildConversationSummary(msgs []dash.ChatMessage) string {
 	var b strings.Builder
 
 	// Session metadata header
@@ -281,7 +280,7 @@ func summarizeQuery(content string) string {
 	return truncate(content, 150)
 }
 
-func uniqueToolNames(msgs []chatMessage) []string {
+func uniqueToolNames(msgs []dash.ChatMessage) []string {
 	seen := make(map[string]bool)
 	var names []string
 	for _, msg := range msgs {
@@ -293,7 +292,7 @@ func uniqueToolNames(msgs []chatMessage) []string {
 	return names
 }
 
-func countUserTurns(msgs []chatMessage) int {
+func countUserTurns(msgs []dash.ChatMessage) int {
 	count := 0
 	for _, msg := range msgs {
 		if msg.Role == "user" {

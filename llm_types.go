@@ -3,6 +3,8 @@ package dash
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 )
 
 type llmContextKey string
@@ -113,13 +115,56 @@ type TokenUsage struct {
 	TotalTokens      int `json:"total_tokens"`
 }
 
-// ChatMessage is the unified message format used by the router.
+// ErrInvalidRole is returned when a ChatMessage has an unrecognized role.
+var ErrInvalidRole = errors.New("invalid message role")
+
+// ValidRoles lists the roles accepted by LLM APIs.
+var ValidRoles = map[string]bool{
+	"user": true, "assistant": true, "tool": true, "system": true,
+}
+
+// ChatMessage is the canonical message format used throughout dash.
+// All messages entering the system must use this type.
 type ChatMessage struct {
 	Role       string          `json:"role"`
 	Content    string          `json:"content,omitempty"`
+	Name       string          `json:"name,omitempty"`        // Tool name (for role=tool)
 	ToolCalls  []ToolCallRef   `json:"tool_calls,omitempty"`
 	ToolCallID string          `json:"tool_call_id,omitempty"`
+	ToolError  bool            `json:"tool_error,omitempty"`  // Structured error flag
+	Reasoning  string          `json:"-"`                     // LLM thinking (not serialized)
 	RawContent json.RawMessage `json:"raw_content,omitempty"` // For multi-part content blocks
+}
+
+// Validate checks that the message has a valid role and required fields.
+func (m ChatMessage) Validate() error {
+	if !ValidRoles[m.Role] {
+		return fmt.Errorf("%w: %q", ErrInvalidRole, m.Role)
+	}
+	if m.Role == "tool" && m.ToolCallID == "" {
+		return fmt.Errorf("tool message missing tool_call_id")
+	}
+	return nil
+}
+
+// NewChatMessage creates a validated ChatMessage. Returns error for invalid roles.
+func NewChatMessage(role, content string) (ChatMessage, error) {
+	m := ChatMessage{Role: role, Content: content}
+	if err := m.Validate(); err != nil {
+		return ChatMessage{}, err
+	}
+	return m, nil
+}
+
+// NewToolResult creates a tool result message with explicit error flag.
+func NewToolResult(toolCallID, name, content string, isError bool) ChatMessage {
+	return ChatMessage{
+		Role:       "tool",
+		Name:       name,
+		Content:    content,
+		ToolCallID: toolCallID,
+		ToolError:  isError,
+	}
 }
 
 // ToolCallRef references a tool call in a message.

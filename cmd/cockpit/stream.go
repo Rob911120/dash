@@ -18,26 +18,6 @@ type chatClient struct {
 	router   *dash.LLMRouter
 }
 
-type chatMessage struct {
-	Role       string     `json:"role"`
-	Content    string     `json:"content,omitempty"`
-	Name       string     `json:"name,omitempty"`
-	ToolCalls  []toolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Reasoning  string     `json:"-"`
-}
-
-type toolCall struct {
-	ID       string       `json:"id"`
-	Type     string       `json:"type"`
-	Function toolFunction `json:"function"`
-}
-
-type toolFunction struct {
-	Name      string `json:"name"`
-	Arguments string `json:"arguments"`
-}
-
 type streamToolCall struct {
 	Index   int
 	ID      string
@@ -173,35 +153,15 @@ func waitForChatMsg(ch <-chan any, owner string) tea.Cmd {
 }
 
 // Stream sends messages via the LLM router using all registered tools.
-func (c *chatClient) Stream(ctx context.Context, messages []chatMessage, ch chan<- any) {
+func (c *chatClient) Stream(ctx context.Context, messages []dash.ChatMessage, ch chan<- any) {
 	c.StreamWithTools(ctx, messages, c.tools, ch)
 }
 
 // StreamWithTools sends messages via the LLM router with a specific set of tools.
-func (c *chatClient) StreamWithTools(ctx context.Context, messages []chatMessage, tools []map[string]any, ch chan<- any) {
+func (c *chatClient) StreamWithTools(ctx context.Context, messages []dash.ChatMessage, tools []map[string]any, ch chan<- any) {
 	defer close(ch)
 
-	// Convert cockpit chatMessages to router ChatMessages
-	routerMsgs := make([]dash.ChatMessage, len(messages))
-	for i, m := range messages {
-		routerMsgs[i] = dash.ChatMessage{
-			Role:       m.Role,
-			Content:    m.Content,
-			ToolCallID: m.ToolCallID,
-		}
-		for _, tc := range m.ToolCalls {
-			routerMsgs[i].ToolCalls = append(routerMsgs[i].ToolCalls, dash.ToolCallRef{
-				ID:   tc.ID,
-				Type: tc.Type,
-				Function: dash.ToolCallFunc{
-					Name:      tc.Function.Name,
-					Arguments: tc.Function.Arguments,
-				},
-			})
-		}
-	}
-
-	events := c.router.StreamWithModel(ctx, c.model, routerMsgs, tools)
+	events := c.router.StreamWithModel(ctx, c.model, messages, tools)
 
 	// Collect usage separately — EventUsage arrives BEFORE EventToolCall
 	// in the Anthropic SSE stream, so emitting chatDoneMsg from EventUsage

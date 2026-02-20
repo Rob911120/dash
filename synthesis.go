@@ -187,7 +187,11 @@ func ApplyPatch(git GitClient, wtPath, patch string) error {
 
 // RunSynthesisPipeline orchestrates the full synthesis flow:
 // review → optional patch → rebuild → commit → push → PR.
-func (d *Dash) RunSynthesisPipeline(ctx context.Context, woID uuid.UUID, git GitClient) (*SynthesisResult, error) {
+//
+// If wtPath is non-empty the caller owns the worktree lifecycle (used by
+// RunFullPipeline).  If wtPath is empty, synthesis creates its own worktree
+// when a revise verdict requires patching.
+func (d *Dash) RunSynthesisPipeline(ctx context.Context, woID uuid.UUID, git GitClient, wtPath string) (*SynthesisResult, error) {
 	// 1. Run synthesis review
 	result, err := d.RunSynthesis(ctx, woID, git)
 	if err != nil {
@@ -210,26 +214,58 @@ func (d *Dash) RunSynthesisPipeline(ctx context.Context, woID uuid.UUID, git Git
 
 	case VerdictRevise:
 		if result.Patch != "" {
-			wtPath := fmt.Sprintf("/tmp/dash-wo/%s", wo.Node.ID)
+			// If no worktree provided, create one for the revise path
+			ownWorktree := false
+			if wtPath == "" {
+				wtPath = fmt.Sprintf("/tmp/dash-wo/%s", wo.Node.ID)
+				if err := git.AddWorktree(wtPath, wo.BranchName); err != nil {
+					d.AdvanceWorkOrder(ctx, woID, WOStatusRejected, "synthesizer", fmt.Sprintf("worktree creation failed: %v", err))
+					return result, nil
+				}
+				ownWorktree = true
+			}
+
 			if err := ApplyPatch(git, wtPath, result.Patch); err != nil {
+				if ownWorktree {
+					git.RemoveWorktree(wtPath)
+				}
 				d.AdvanceWorkOrder(ctx, woID, WOStatusRejected, "synthesizer", fmt.Sprintf("patch apply failed: %v", err))
 				return result, nil
 			}
 
-			// Rebuild after patch
-			gateResult, err := RunBuildGate(git, wo)
+			// Rebuild after patch (reuse the same worktree WITH patch applied)
+			gateResult, err := RunBuildGate(git, wo, wtPath)
 			if err != nil || !gateResult.Passed {
 				reason := "rebuild after patch failed"
 				if err != nil {
 					reason = err.Error()
 				}
+				if ownWorktree {
+					git.RemoveWorktree(wtPath)
+				}
 				d.AdvanceWorkOrder(ctx, woID, WOStatusRejected, "synthesizer", reason)
 				return result, nil
 			}
 
-			// Commit the patch
-			if err := git.CommitAll(fmt.Sprintf("synthesis: apply reviewer patch for %s", wo.Node.Name)); err != nil {
+			// Commit the patch in the worktree
+			commitMsg := fmt.Sprintf("synthesis: apply reviewer patch for %s", wo.Node.Name)
+			if err := git.CommitAllIn(wtPath, commitMsg); err != nil {
+				if ownWorktree {
+					git.RemoveWorktree(wtPath)
+				}
 				return result, fmt.Errorf("commit patch: %w", err)
+			}
+
+			// Update branch ref so PushBranch pushes the worktree commit
+			if err := git.UpdateBranchRef(wo.BranchName, wtPath); err != nil {
+				if ownWorktree {
+					git.RemoveWorktree(wtPath)
+				}
+				return result, fmt.Errorf("update branch ref: %w", err)
+			}
+
+			if ownWorktree {
+				git.RemoveWorktree(wtPath)
 			}
 		}
 		// Fall through to merge flow

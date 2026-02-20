@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"time"
+
+	"dash"
 )
 
 // pendingQuery tracks a cross-agent query from caller to target.
@@ -17,14 +19,14 @@ type pendingQuery struct {
 
 // chatToolResultWithAsk is sent when executeTools detects an ask_agent result.
 type chatToolResultWithAsk struct {
-	results []chatMessage
+	results []dash.ChatMessage
 	calls   []streamToolCall
 	query   pendingQuery
 }
 
 // chatToolResultWithAnswer is sent when executeTools detects an answer_query result.
 type chatToolResultWithAnswer struct {
-	results []chatMessage
+	results []dash.ChatMessage
 	calls   []streamToolCall
 	queryID string
 	answer  string
@@ -61,7 +63,7 @@ func parseAnswerResult(resultJSON string) (queryID, answer string) {
 }
 
 // replaceToolResult replaces the content of a tool result message matching toolCallID.
-func replaceToolResult(messages []chatMessage, toolCallID, newContent string) {
+func replaceToolResult(messages []dash.ChatMessage, toolCallID, newContent string) {
 	for i := range messages {
 		if messages[i].Role == "tool" && messages[i].ToolCallID == toolCallID {
 			messages[i].Content = newContent
@@ -79,7 +81,7 @@ func strOr(v any, fallback string) string {
 
 // chatToolResultWithPlanRequest is sent when executeTools detects a give_to_planner result.
 type chatToolResultWithPlanRequest struct {
-	results   []chatMessage
+	results   []dash.ChatMessage
 	calls     []streamToolCall
 	requestID string
 	desc      string
